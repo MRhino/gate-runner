@@ -1,0 +1,522 @@
+import * as THREE from 'three';
+import { registerSW } from 'virtual:pwa-register';
+import './style.css';
+
+registerSW({ immediate: true });
+
+// ---------- Tunables ----------
+const ROAD_HALF = 4; // road spans x in [-4, 4]
+const SPAWN_Z = -70;
+const WORLD_SPEED = 7; // speed gates / crates move toward the player
+const MAX_BULLETS = 800;
+const MAX_ENEMIES = 250;
+const PLAYER_LIVES = 5;
+
+// ---------- Renderer / scene ----------
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.shadowMap.enabled = true;
+document.getElementById('app')!.appendChild(renderer.domElement);
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x1a1040);
+scene.fog = new THREE.Fog(0x1a1040, 35, 75);
+
+const camera = new THREE.PerspectiveCamera(55, 1, 0.1, 200);
+camera.position.set(0, 10, 9);
+camera.lookAt(0, 0, -16);
+
+scene.add(new THREE.HemisphereLight(0xbfd4ff, 0x302040, 1.4));
+const sun = new THREE.DirectionalLight(0xffffff, 2);
+sun.position.set(5, 15, 5);
+sun.castShadow = true;
+sun.shadow.mapSize.set(1024, 1024);
+Object.assign(sun.shadow.camera, { left: -10, right: 10, top: 10, bottom: -40 });
+scene.add(sun);
+
+function resize() {
+  const w = innerWidth, h = innerHeight;
+  renderer.setSize(w, h);
+  camera.aspect = w / h;
+  // Keep the whole road visible on narrow portrait screens.
+  camera.fov = w / h < 0.6 ? 62 : 55;
+  camera.updateProjectionMatrix();
+}
+addEventListener('resize', resize);
+resize();
+
+// ---------- Road (scrolling stripes sell the forward motion) ----------
+const road = new THREE.Mesh(
+  new THREE.PlaneGeometry(ROAD_HALF * 2, 200),
+  new THREE.MeshStandardMaterial({ color: 0x3a2f6b }),
+);
+road.rotation.x = -Math.PI / 2;
+road.position.z = -80;
+road.receiveShadow = true;
+scene.add(road);
+
+const stripes: THREE.Mesh[] = [];
+const stripeMat = new THREE.MeshBasicMaterial({ color: 0x5c4fa0 });
+for (let i = 0; i < 20; i++) {
+  const s = new THREE.Mesh(new THREE.PlaneGeometry(0.15, 2), stripeMat);
+  s.rotation.x = -Math.PI / 2;
+  s.position.set(0, 0.01, -i * 5);
+  scene.add(s);
+  stripes.push(s);
+}
+for (const side of [-1, 1]) {
+  const rail = new THREE.Mesh(
+    new THREE.BoxGeometry(0.3, 0.4, 200),
+    new THREE.MeshStandardMaterial({ color: 0xff5d8f }),
+  );
+  rail.position.set(side * (ROAD_HALF + 0.15), 0.2, -80);
+  scene.add(rail);
+}
+
+// ---------- Player ----------
+const player = new THREE.Group();
+const body = new THREE.Mesh(
+  new THREE.CapsuleGeometry(0.45, 0.6, 4, 12),
+  new THREE.MeshStandardMaterial({ color: 0xffd23f }),
+);
+body.position.y = 0.75;
+body.castShadow = true;
+player.add(body);
+const gunMat = new THREE.MeshStandardMaterial({ color: 0x333344 });
+const guns: THREE.Mesh[] = [];
+scene.add(player);
+
+function rebuildGuns() {
+  guns.forEach((g) => player.remove(g));
+  guns.length = 0;
+  for (const x of gunOffsets()) {
+    const g = new THREE.Mesh(new THREE.BoxGeometry(0.14, 0.14, 0.7), gunMat);
+    g.position.set(x, 0.9, -0.45);
+    player.add(g);
+    guns.push(g);
+  }
+}
+
+// ---------- Text textures for gates and crates ----------
+function makeLabel(w = 256, h = 128) {
+  const canvas = document.createElement('canvas');
+  canvas.width = w; canvas.height = h;
+  const tex = new THREE.CanvasTexture(canvas);
+  tex.colorSpace = THREE.SRGBColorSpace;
+  const draw = (text: string, bg: string, fg = '#fff') => {
+    const ctx = canvas.getContext('2d')!;
+    ctx.clearRect(0, 0, w, h);
+    ctx.fillStyle = bg;
+    ctx.beginPath();
+    ctx.roundRect(4, 4, w - 8, h - 8, 18);
+    ctx.fill();
+    ctx.fillStyle = fg;
+    ctx.font = `900 ${h * 0.5}px system-ui, sans-serif`;
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(text, w / 2, h / 2 + 4);
+    tex.needsUpdate = true;
+  };
+  return { tex, draw };
+}
+
+// ---------- Game state ----------
+type GateOp = { kind: 'mul' | 'add' | 'sub' | 'div'; n: number };
+type GateRow = { id: number; z: number; mid: number; ops: [GateOp, GateOp]; meshes: THREE.Mesh[] };
+type Bullet = { x: number; z: number; row: number; alive: boolean };
+type Enemy = { x: number; z: number; hp: number; speed: number; wobble: number };
+type UpgradeKind = 'rate' | 'gun' | 'dmg' | 'speed';
+type Crate = {
+  x: number; z: number; hp: number; maxHp: number; open: boolean; kind: UpgradeKind;
+  mesh: THREE.Mesh; sprite: THREE.Sprite; draw: (t: string, bg: string, fg?: string) => void;
+};
+
+const UPGRADES: Record<UpgradeKind, { label: string; color: string }> = {
+  rate: { label: 'RATE+', color: '#29c46b' },
+  gun: { label: 'GUN+', color: '#2f9bff' },
+  dmg: { label: 'DMG+', color: '#ff8a29' },
+  speed: { label: 'SPD+', color: '#c74bff' },
+};
+
+let state: 'menu' | 'play' | 'over' = 'menu';
+let bullets: Bullet[] = [];
+let enemies: Enemy[] = [];
+let rows: GateRow[] = [];
+let crates: Crate[] = [];
+let playerX = 0, targetX = 0;
+let lives = PLAYER_LIVES, score = 0, time = 0;
+let fireRate = 3, gunCount = 1, damage = 1, bulletSpeed = 30;
+let fireTimer = 0, enemyTimer = 0, rowTimer = 2, crateTimer = 6, rowId = 0;
+let hurtFlash = 0;
+
+const gunOffsets = () =>
+  Array.from({ length: gunCount }, (_, i) => (i - (gunCount - 1) / 2) * 0.35);
+
+// ---------- Instanced bullets & enemies ----------
+const bulletMesh = new THREE.InstancedMesh(
+  new THREE.SphereGeometry(0.13, 8, 6),
+  new THREE.MeshBasicMaterial({ color: 0xfff0a0 }),
+  MAX_BULLETS,
+);
+bulletMesh.frustumCulled = false;
+scene.add(bulletMesh);
+
+const enemyMesh = new THREE.InstancedMesh(
+  new THREE.CapsuleGeometry(0.35, 0.5, 3, 8),
+  new THREE.MeshStandardMaterial({ color: 0xffffff }),
+  MAX_ENEMIES,
+);
+enemyMesh.castShadow = true;
+enemyMesh.frustumCulled = false;
+scene.add(enemyMesh);
+
+const tmp = new THREE.Object3D();
+const tmpColor = new THREE.Color();
+
+// ---------- Spawning ----------
+const rand = (a: number, b: number) => a + Math.random() * (b - a);
+const pick = <T,>(arr: T[]) => arr[Math.floor(Math.random() * arr.length)];
+
+function randomOp(good: boolean): GateOp {
+  if (good) {
+    return pick<GateOp>([
+      { kind: 'mul', n: 2 }, { kind: 'mul', n: 2 }, { kind: 'mul', n: 3 },
+      { kind: 'add', n: 3 }, { kind: 'add', n: 5 },
+    ]);
+  }
+  return pick<GateOp>([{ kind: 'sub', n: 1 }, { kind: 'div', n: 2 }, { kind: 'div', n: 3 }]);
+}
+const opText = (o: GateOp) =>
+  ({ mul: '×', add: '+', sub: '−', div: '÷' })[o.kind] + o.n;
+const isGood = (o: GateOp) => o.kind === 'mul' || o.kind === 'add';
+
+function spawnRow() {
+  // Mostly one good + one bad side; sometimes both good with different values.
+  const goodLeft = Math.random() < 0.5;
+  const bothGood = Math.random() < 0.25;
+  const ops: [GateOp, GateOp] = [
+    randomOp(bothGood || goodLeft),
+    randomOp(bothGood || !goodLeft),
+  ];
+  // The split between halves drifts so you have to aim, not just pick a side.
+  const mid = rand(-1.5, 1.5);
+  const meshes: THREE.Mesh[] = [];
+  const spans: [number, number][] = [[-ROAD_HALF, mid], [mid, ROAD_HALF]];
+  spans.forEach(([a, b], i) => {
+    const { tex, draw } = makeLabel();
+    draw(opText(ops[i]), isGood(ops[i]) ? '#1e88e5cc' : '#e53935cc');
+    const m = new THREE.Mesh(
+      new THREE.PlaneGeometry(b - a - 0.1, 2.2),
+      new THREE.MeshBasicMaterial({ map: tex, transparent: true, side: THREE.DoubleSide, depthWrite: false }),
+    );
+    m.position.set((a + b) / 2, 1.1, SPAWN_Z);
+    scene.add(m);
+    meshes.push(m);
+  });
+  rows.push({ id: ++rowId, z: SPAWN_Z, mid, ops, meshes });
+}
+
+function spawnEnemy() {
+  if (enemies.length >= MAX_ENEMIES) return;
+  const tier = Math.floor(time / 25);
+  enemies.push({
+    x: rand(-ROAD_HALF + 0.5, ROAD_HALF - 0.5),
+    z: SPAWN_Z + rand(-5, 0),
+    hp: 2 + tier * 2 + Math.floor(Math.random() * (2 + tier)),
+    speed: rand(3, 4.5) + tier * 0.3,
+    wobble: Math.random() * 10,
+  });
+}
+
+function spawnCrate() {
+  const kind = pick<UpgradeKind>(['rate', 'gun', 'dmg', 'speed']);
+  const maxHp = Math.round(30 + time * 1.5);
+  const mesh = new THREE.Mesh(
+    new THREE.BoxGeometry(1.6, 1.6, 1.6),
+    new THREE.MeshStandardMaterial({ color: 0x8a6a4a }),
+  );
+  mesh.castShadow = true;
+  const x = rand(-ROAD_HALF + 1, ROAD_HALF - 1);
+  mesh.position.set(x, 0.8, SPAWN_Z);
+  const { tex, draw } = makeLabel();
+  const sprite = new THREE.Sprite(new THREE.SpriteMaterial({ map: tex, depthTest: false }));
+  sprite.scale.set(2, 1, 1);
+  sprite.position.set(x, 2.4, SPAWN_Z);
+  scene.add(mesh, sprite);
+  const c: Crate = { x, z: SPAWN_Z, hp: maxHp, maxHp, open: false, kind, mesh, sprite, draw };
+  draw(String(maxHp), '#000a');
+  crates.push(c);
+}
+
+function removeCrate(c: Crate) {
+  scene.remove(c.mesh, c.sprite);
+  c.mesh.geometry.dispose();
+  (c.mesh.material as THREE.Material).dispose();
+  c.sprite.material.map?.dispose();
+  c.sprite.material.dispose();
+}
+function removeRow(r: GateRow) {
+  for (const m of r.meshes) {
+    scene.remove(m);
+    m.geometry.dispose();
+    const mat = m.material as THREE.MeshBasicMaterial;
+    mat.map?.dispose();
+    mat.dispose();
+  }
+}
+
+// ---------- Gate logic ----------
+// Rows are met in id order, so each bullet only needs to remember the last row it crossed.
+let divCounter = 0;
+function applyGate(b: Bullet, r: GateRow, out: Bullet[]) {
+  b.row = r.id;
+  const op = b.x < r.mid ? r.ops[0] : r.ops[1];
+  const clone = (dx: number) => {
+    if (bullets.length + out.length >= MAX_BULLETS) return;
+    const nx = THREE.MathUtils.clamp(b.x + dx, -ROAD_HALF + 0.1, ROAD_HALF - 0.1);
+    out.push({ x: nx, z: b.z - Math.random() * 0.6, row: r.id, alive: true });
+  };
+  switch (op.kind) {
+    case 'mul':
+      for (let i = 1; i < op.n; i++) clone((i % 2 ? 1 : -1) * Math.ceil(i / 2) * 0.25);
+      break;
+    case 'add':
+      for (let i = 0; i < op.n; i++) clone(rand(-0.5, 0.5));
+      break;
+    case 'sub':
+      b.alive = false;
+      break;
+    case 'div':
+      // Keep exactly 1 in n bullets so the result is predictable, not random.
+      if (divCounter++ % op.n !== 0) b.alive = false;
+      break;
+  }
+}
+
+// ---------- Input: relative drag ----------
+let dragging = false, dragStartX = 0, dragStartTarget = 0;
+renderer.domElement.addEventListener('pointerdown', (e) => {
+  dragging = true;
+  dragStartX = e.clientX;
+  dragStartTarget = targetX;
+  renderer.domElement.setPointerCapture(e.pointerId);
+});
+renderer.domElement.addEventListener('pointermove', (e) => {
+  if (!dragging) return;
+  const unitsPerPx = (ROAD_HALF * 2.4) / innerWidth;
+  targetX = THREE.MathUtils.clamp(
+    dragStartTarget + (e.clientX - dragStartX) * unitsPerPx,
+    -ROAD_HALF + 0.5, ROAD_HALF - 0.5,
+  );
+});
+const endDrag = () => (dragging = false);
+renderer.domElement.addEventListener('pointerup', endDrag);
+renderer.domElement.addEventListener('pointercancel', endDrag);
+addEventListener('keydown', (e) => {
+  if (e.key === 'ArrowLeft') targetX = Math.max(-ROAD_HALF + 0.5, targetX - 1);
+  if (e.key === 'ArrowRight') targetX = Math.min(ROAD_HALF - 0.5, targetX + 1);
+});
+
+// ---------- HUD ----------
+const $ = (id: string) => document.getElementById(id)!;
+const overlay = $('overlay'), startBtn = $('start');
+const best = () => Number(localStorage.getItem('gate-runner-best') ?? 0);
+
+function updateHud() {
+  $('score').textContent = String(score);
+  $('lives').textContent = '♥'.repeat(Math.max(lives, 0)) + '♡'.repeat(PLAYER_LIVES - Math.max(lives, 0));
+  $('stats').innerHTML =
+    `guns ${gunCount} · dmg ${damage}<br>rate ${fireRate.toFixed(1)}/s · spd ${bulletSpeed.toFixed(0)}<br>bullets ${bullets.length}`;
+}
+
+function reset() {
+  bullets = []; enemies = [];
+  rows.forEach(removeRow); rows = [];
+  crates.forEach(removeCrate); crates = [];
+  playerX = targetX = 0;
+  lives = PLAYER_LIVES; score = 0; time = 0;
+  fireRate = 3; gunCount = 1; damage = 1; bulletSpeed = 30;
+  fireTimer = 0; enemyTimer = 0; rowTimer = 1.5; crateTimer = 6;
+  rebuildGuns();
+  updateHud();
+}
+
+startBtn.addEventListener('click', () => {
+  reset();
+  state = 'play';
+  overlay.classList.add('hidden');
+});
+
+function gameOver() {
+  state = 'over';
+  if (score > best()) localStorage.setItem('gate-runner-best', String(score));
+  overlay.querySelector('h1')!.textContent = 'OVERRUN';
+  overlay.querySelector('p')!.textContent = `Score ${score}`;
+  startBtn.textContent = 'PLAY AGAIN';
+  $('best').textContent = `Best ${best()}`;
+  overlay.classList.remove('hidden');
+}
+$('best').textContent = best() ? `Best ${best()}` : '';
+
+function collect(kind: UpgradeKind) {
+  if (kind === 'rate') fireRate = Math.min(fireRate * 1.3, 20);
+  if (kind === 'gun') { gunCount = Math.min(gunCount + 1, 6); rebuildGuns(); }
+  if (kind === 'dmg') damage += 1;
+  if (kind === 'speed') bulletSpeed = Math.min(bulletSpeed * 1.2, 70);
+  navigator.vibrate?.(40);
+}
+
+// ---------- Main loop ----------
+function update(dt: number) {
+  time += dt;
+
+  playerX += (targetX - playerX) * Math.min(1, dt * 14);
+  player.position.x = playerX;
+  body.rotation.z = (playerX - targetX) * 0.3;
+
+  for (const s of stripes) {
+    s.position.z += WORLD_SPEED * dt;
+    if (s.position.z > 5) s.position.z -= 100;
+  }
+
+  // Spawners: difficulty ramps with time.
+  enemyTimer -= dt;
+  if (enemyTimer <= 0) {
+    const burst = 1 + Math.floor(time / 20);
+    for (let i = 0; i < burst; i++) spawnEnemy();
+    enemyTimer = Math.max(0.35, 1.6 - time * 0.015);
+  }
+  rowTimer -= dt;
+  if (rowTimer <= 0) { spawnRow(); rowTimer = rand(3.5, 5); }
+  crateTimer -= dt;
+  if (crateTimer <= 0) { spawnCrate(); crateTimer = rand(9, 13); }
+
+  // Fire.
+  fireTimer -= dt;
+  if (fireTimer <= 0) {
+    fireTimer = 1 / fireRate;
+    for (const ox of gunOffsets()) {
+      if (bullets.length < MAX_BULLETS) bullets.push({ x: playerX + ox, z: -1, row: 0, alive: true });
+    }
+  }
+
+  // Move gates & crates.
+  for (const r of rows) {
+    r.z += WORLD_SPEED * dt;
+    r.meshes.forEach((m) => (m.position.z = r.z));
+  }
+  rows = rows.filter((r) => (r.z > 3 ? (removeRow(r), false) : true));
+
+  for (const c of crates) {
+    c.z += WORLD_SPEED * dt * (c.open ? 1.4 : 1);
+    c.mesh.position.z = c.sprite.position.z = c.z;
+    if (c.open) c.mesh.rotation.y += dt * 3;
+  }
+
+  // Move bullets, pass gates, hit things.
+  const spawned: Bullet[] = [];
+  for (const b of bullets) {
+    b.z -= bulletSpeed * dt;
+    for (const r of rows) {
+      if (r.id > b.row && b.z <= r.z) { applyGate(b, r, spawned); if (!b.alive) break; }
+    }
+    if (!b.alive) continue;
+    if (b.z < SPAWN_Z - 5) { b.alive = false; continue; }
+
+    for (const c of crates) {
+      if (!c.open && Math.abs(b.x - c.x) < 0.9 && Math.abs(b.z - c.z) < 0.9) {
+        b.alive = false;
+        c.hp -= damage;
+        if (c.hp <= 0) {
+          c.open = true;
+          const u = UPGRADES[c.kind];
+          (c.mesh.material as THREE.MeshStandardMaterial).color.set(u.color);
+          c.draw(u.label, u.color);
+        } else {
+          c.draw(String(c.hp), '#000a');
+        }
+        break;
+      }
+    }
+    if (!b.alive) continue;
+
+    for (const e of enemies) {
+      if (e.hp > 0 && Math.abs(b.x - e.x) < 0.45 && Math.abs(b.z - e.z) < 0.5) {
+        b.alive = false;
+        e.hp -= damage;
+        if (e.hp <= 0) score += 10;
+        break;
+      }
+    }
+  }
+  bullets = bullets.filter((b) => b.alive).concat(spawned);
+
+  // Enemies march toward the player.
+  for (const e of enemies) {
+    if (e.hp <= 0) continue;
+    e.z += e.speed * dt;
+    e.x += Math.sin(time * 2 + e.wobble) * dt * 0.4;
+    if (e.z > -0.3) {
+      e.hp = 0;
+      lives -= 1;
+      hurtFlash = 0.3;
+      navigator.vibrate?.(120);
+    }
+  }
+  enemies = enemies.filter((e) => e.hp > 0);
+
+  // Crates: catch opened ones, lose them if they slip by.
+  crates = crates.filter((c) => {
+    if (c.open && c.z > -0.8 && c.z < 0.8 && Math.abs(c.x - playerX) < 1.3) {
+      collect(c.kind);
+      removeCrate(c);
+      return false;
+    }
+    if (c.z > 3) { removeCrate(c); return false; }
+    return true;
+  });
+
+  if (lives <= 0) gameOver();
+}
+
+function render(dt: number) {
+  for (let i = 0; i < bullets.length; i++) {
+    tmp.position.set(bullets[i].x, 0.9, bullets[i].z);
+    tmp.rotation.set(0, 0, 0);
+    tmp.scale.setScalar(1);
+    tmp.updateMatrix();
+    bulletMesh.setMatrixAt(i, tmp.matrix);
+  }
+  bulletMesh.count = bullets.length;
+  bulletMesh.instanceMatrix.needsUpdate = true;
+
+  for (let i = 0; i < enemies.length; i++) {
+    const e = enemies[i];
+    tmp.position.set(e.x, 0.6 + Math.abs(Math.sin(time * 8 + e.wobble)) * 0.15, e.z);
+    tmp.scale.setScalar(1 + Math.min(e.hp, 20) * 0.03); // tougher enemies look bigger
+    tmp.updateMatrix();
+    enemyMesh.setMatrixAt(i, tmp.matrix);
+    enemyMesh.setColorAt(i, tmpColor.setHSL(0.98 - Math.min(e.hp, 20) * 0.02, 0.8, 0.55));
+  }
+  enemyMesh.count = enemies.length;
+  enemyMesh.instanceMatrix.needsUpdate = true;
+  if (enemyMesh.instanceColor) enemyMesh.instanceColor.needsUpdate = true;
+
+  hurtFlash = Math.max(0, hurtFlash - dt);
+  (scene.background as THREE.Color).setRGB(0.1 + hurtFlash * 1.5, 0.06, 0.25);
+
+  renderer.render(scene, camera);
+}
+
+rebuildGuns();
+let last = performance.now(), hudTimer = 0;
+renderer.setAnimationLoop((now) => {
+  const dt = Math.min((now - last) / 1000, 1 / 20); // clamp so tab switches don't teleport things
+  last = now;
+  if (state === 'play') {
+    update(dt);
+    hudTimer -= dt;
+    if (hudTimer <= 0) { updateHud(); hudTimer = 0.1; }
+  }
+  render(dt);
+});

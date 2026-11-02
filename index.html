@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover" />
+    <meta name="theme-color" content="#0b0820" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <link rel="apple-touch-icon" href="/icon-180.png" />
+    <title>Gate Runner</title>
+  </head>
+  <body>
+    <div id="app"></div>
+    <div id="hud">
+      <div><span id="score">0</span><small>SCORE</small></div>
+      <div id="lives"></div>
+      <div id="stats"></div>
+    </div>
+    <div id="overlay">
+      <h1>GATE RUNNER</h1>
+      <p>Drag to move. Steer your shots through gates to multiply them.<br />
+        Shoot crates open, then <b>catch</b> them for upgrades.<br />
+        Don't let the horde reach you.</p>
+      <button id="start">TAP TO PLAY</button>
+      <p id="best"></p>
+    </div>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>
