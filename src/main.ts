@@ -1,6 +1,7 @@
 import * as THREE from 'three';
 import { registerSW } from 'virtual:pwa-register';
 import './style.css';
+import { buildEnemyModels, buildPlayer, HIP_Y } from './models';
 
 registerSW({ immediate: true });
 
@@ -16,21 +17,26 @@ const PLAYER_LIVES = 5;
 const renderer = new THREE.WebGLRenderer({ antialias: true });
 renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
 renderer.shadowMap.enabled = true;
+renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+renderer.toneMappingExposure = 1.1;
 document.getElementById('app')!.appendChild(renderer.domElement);
 
 const scene = new THREE.Scene();
-scene.background = new THREE.Color(0x1a1040);
-scene.fog = new THREE.Fog(0x1a1040, 35, 75);
+const SKY = new THREE.Color(0x24164f);
+scene.background = SKY.clone();
+scene.fog = new THREE.Fog(SKY, 30, 78);
 
 const camera = new THREE.PerspectiveCamera(55, 1, 0.1, 200);
 camera.position.set(0, 10, 9);
 camera.lookAt(0, 0, -16);
 
-scene.add(new THREE.HemisphereLight(0xbfd4ff, 0x302040, 1.4));
-const sun = new THREE.DirectionalLight(0xffffff, 2);
+scene.add(new THREE.HemisphereLight(0xc8d8ff, 0x3a2050, 1.5));
+const sun = new THREE.DirectionalLight(0xfff1dd, 2.4);
 sun.position.set(5, 15, 5);
 sun.castShadow = true;
-sun.shadow.mapSize.set(1024, 1024);
+sun.shadow.mapSize.set(1024, 2048);
+sun.shadow.bias = -0.0005;
 Object.assign(sun.shadow.camera, { left: -10, right: 10, top: 10, bottom: -40 });
 scene.add(sun);
 
@@ -46,16 +52,71 @@ addEventListener('resize', resize);
 resize();
 
 // ---------- Road (static: you hold your ground, everything comes to you) ----------
+// Subtle tile pattern on the road via a canvas texture.
+const roadTex = (() => {
+  const c = document.createElement('canvas');
+  c.width = c.height = 128;
+  const g = c.getContext('2d')!;
+  g.fillStyle = '#3b3070'; g.fillRect(0, 0, 128, 128);
+  g.fillStyle = '#342a63'; g.fillRect(0, 0, 64, 64); g.fillRect(64, 64, 64, 64);
+  g.strokeStyle = '#2a2150'; g.lineWidth = 3; g.strokeRect(0, 0, 128, 128);
+  const t = new THREE.CanvasTexture(c);
+  t.colorSpace = THREE.SRGBColorSpace;
+  t.wrapS = t.wrapT = THREE.RepeatWrapping;
+  t.repeat.set(4, 100);
+  t.anisotropy = 4;
+  return t;
+})();
 const road = new THREE.Mesh(
   new THREE.PlaneGeometry(ROAD_HALF * 2, 200),
-  new THREE.MeshStandardMaterial({ color: 0x3a2f6b }),
+  new THREE.MeshStandardMaterial({ map: roadTex, roughness: 0.85 }),
 );
 road.rotation.x = -Math.PI / 2;
 road.position.z = -80;
 road.receiveShadow = true;
 scene.add(road);
 
-const stripeMat = new THREE.MeshBasicMaterial({ color: 0x5c4fa0 });
+// Ground either side of the road, with scattered rocks and glowing lamp posts.
+for (const side of [-1, 1]) {
+  const ground = new THREE.Mesh(
+    new THREE.PlaneGeometry(40, 200),
+    new THREE.MeshStandardMaterial({ color: 0x1d3a3a, roughness: 1 }),
+  );
+  ground.rotation.x = -Math.PI / 2;
+  ground.position.set(side * (ROAD_HALF + 20.3), -0.05, -80);
+  ground.receiveShadow = true;
+  scene.add(ground);
+}
+{
+  const rockGeo = new THREE.DodecahedronGeometry(0.6, 0);
+  const rocks = new THREE.InstancedMesh(rockGeo, new THREE.MeshStandardMaterial({ color: 0x4a5a6a, flatShading: true }), 60);
+  const o = new THREE.Object3D();
+  for (let i = 0; i < 60; i++) {
+    const side = i % 2 ? 1 : -1;
+    o.position.set(side * (ROAD_HALF + 1.2 + Math.random() * 10), 0.1, 6 - Math.random() * 90);
+    o.rotation.set(Math.random() * 3, Math.random() * 3, Math.random() * 3);
+    o.scale.setScalar(0.4 + Math.random() * 1.4);
+    o.updateMatrix();
+    rocks.setMatrixAt(i, o.matrix);
+  }
+  rocks.castShadow = rocks.receiveShadow = true;
+  scene.add(rocks);
+
+  const postMat = new THREE.MeshStandardMaterial({ color: 0x22223a, metalness: 0.6, roughness: 0.4 });
+  const lampMat = new THREE.MeshStandardMaterial({ color: 0xffd6a0, emissive: 0xffb050, emissiveIntensity: 2.5 });
+  for (let z = 4; z > -80; z -= 10) {
+    for (const side of [-1, 1]) {
+      const post = new THREE.Mesh(new THREE.CylinderGeometry(0.08, 0.12, 3, 8), postMat);
+      post.position.set(side * (ROAD_HALF + 0.7), 1.5, z);
+      post.castShadow = true;
+      const lamp = new THREE.Mesh(new THREE.SphereGeometry(0.22, 12, 8), lampMat);
+      lamp.position.set(side * (ROAD_HALF + 0.7), 3.1, z);
+      scene.add(post, lamp);
+    }
+  }
+}
+
+const stripeMat = new THREE.MeshBasicMaterial({ color: 0x6d5fc0 });
 for (let i = 0; i < 20; i++) {
   const s = new THREE.Mesh(new THREE.PlaneGeometry(0.15, 2), stripeMat);
   s.rotation.x = -Math.PI / 2;
@@ -65,7 +126,7 @@ for (let i = 0; i < 20; i++) {
 for (const side of [-1, 1]) {
   const rail = new THREE.Mesh(
     new THREE.BoxGeometry(0.3, 0.4, 200),
-    new THREE.MeshStandardMaterial({ color: 0xff5d8f }),
+    new THREE.MeshStandardMaterial({ color: 0xff5d8f, emissive: 0xff2d6f, emissiveIntensity: 0.6 }),
   );
   rail.position.set(side * (ROAD_HALF + 0.15), 0.2, -80);
   scene.add(rail);
@@ -73,14 +134,9 @@ for (const side of [-1, 1]) {
 
 // ---------- Player ----------
 const player = new THREE.Group();
-const body = new THREE.Mesh(
-  new THREE.CapsuleGeometry(0.45, 0.6, 4, 12),
-  new THREE.MeshStandardMaterial({ color: 0xffd23f }),
-);
-body.position.y = 0.75;
-body.castShadow = true;
+const { root: body, legs: playerLegs } = buildPlayer();
 player.add(body);
-const gunMat = new THREE.MeshStandardMaterial({ color: 0x333344 });
+const gunMat = new THREE.MeshStandardMaterial({ color: 0x3a3d55, metalness: 0.7, roughness: 0.35 });
 const guns: THREE.Mesh[] = [];
 scene.add(player);
 
@@ -134,7 +190,7 @@ type Bullet = { x: number; z: number; vx: number; alive: boolean; crate?: Crate 
 type EnemyKind = 'grunt' | 'runner' | 'blue' | 'purple' | 'orange' | 'red' | 'boss';
 type Enemy = {
   x: number; z: number; hp: number; maxHp: number; speed: number; wobble: number;
-  kind: EnemyKind; size: number; color: THREE.Color; dmg: number; points: number;
+  kind: EnemyKind; size: number; color: THREE.Color; dmg: number; points: number; flash: number;
 };
 
 // Tougher tiers are rarer: low-HP grunts make up the bulk of every pack, heavies get mixed in.
@@ -175,12 +231,12 @@ let lives = PLAYER_LIVES, score = 0, time = 0, wave = 0;
 // strong early doesn't trivialise later waves and bosses.
 const BASE_DPS = 5; // starting loadout: 1 shot x 1 dmg x 5/s
 const playerDps = () => shotsPerVolley() * damage * fireRate;
-// Sublinear, so upgrades still feel good: doubling your DPS raises enemy HP ~57%.
-const powerScale = () => Math.pow(playerDps() / BASE_DPS, 0.65);
+// Sublinear, so upgrades still feel good: doubling your DPS raises enemy HP ~52%.
+const powerScale = () => Math.pow(playerDps() / BASE_DPS, 0.6);
 // "Heat" tracks how comfortably you're winning. Killing enemies far up the road
 // pushes it up; letting them get close or losing hearts pulls it down.
 let heat = 1, killDepth = -30;
-const HEAT_MIN = 0.6, HEAT_MAX = 2.5;
+const HEAT_MIN = 0.6, HEAT_MAX = 2.2;
 let fireRate = 5, gunCount = 1, gateBonus = 0, damage = 1, bulletSpeed = 30;
 let fireTimer = 0, enemyTimer = 0, rowTimer = 2, crateTimer = 6;
 let hurtFlash = 0;
@@ -198,21 +254,55 @@ const gunOffsets = () => {
 
 // ---------- Instanced bullets & enemies ----------
 const bulletMesh = new THREE.InstancedMesh(
-  new THREE.SphereGeometry(0.13, 8, 6),
-  new THREE.MeshBasicMaterial({ color: 0xfff0a0 }),
+  new THREE.CapsuleGeometry(0.08, 0.35, 3, 6).rotateX(Math.PI / 2),
+  new THREE.MeshBasicMaterial({ color: 0xfff3b0 }),
   MAX_BULLETS,
 );
 bulletMesh.frustumCulled = false;
 scene.add(bulletMesh);
 
-const enemyMesh = new THREE.InstancedMesh(
-  new THREE.CapsuleGeometry(0.35, 0.5, 3, 8),
-  new THREE.MeshStandardMaterial({ color: 0xffffff }),
-  MAX_ENEMIES,
+// One set of instanced meshes per enemy type: tinted body, untinted accents, and two legs.
+const enemyMat = new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.6 });
+const accentMat = new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.35, metalness: 0.2 });
+type EnemyMeshes = { body: THREE.InstancedMesh; accent: THREE.InstancedMesh; legL: THREE.InstancedMesh; legR: THREE.InstancedMesh };
+const enemyMeshes: Record<string, EnemyMeshes> = {};
+for (const [kind, model] of Object.entries(buildEnemyModels())) {
+  const mk = (geo: THREE.BufferGeometry, mat: THREE.Material) => {
+    const m = new THREE.InstancedMesh(geo, mat, MAX_ENEMIES);
+    m.castShadow = true;
+    m.frustumCulled = false;
+    m.count = 0;
+    scene.add(m);
+    return m;
+  };
+  enemyMeshes[kind] = {
+    body: mk(model.body, enemyMat), accent: mk(model.accent, accentMat),
+    legL: mk(model.leg, enemyMat), legR: mk(model.leg, enemyMat),
+  };
+}
+
+// Death bursts: little cubes that pop out in the enemy's colour.
+type Particle = { p: THREE.Vector3; v: THREE.Vector3; life: number; color: THREE.Color };
+const MAX_PARTICLES = 600;
+let particles: Particle[] = [];
+const particleMesh = new THREE.InstancedMesh(
+  new THREE.BoxGeometry(0.14, 0.14, 0.14),
+  new THREE.MeshStandardMaterial({ roughness: 0.5 }),
+  MAX_PARTICLES,
 );
-enemyMesh.castShadow = true;
-enemyMesh.frustumCulled = false;
-scene.add(enemyMesh);
+particleMesh.frustumCulled = false;
+scene.add(particleMesh);
+function burst(e: Enemy) {
+  const n = Math.min(6 + Math.round(e.size * 6), MAX_PARTICLES - particles.length);
+  for (let i = 0; i < n; i++) {
+    particles.push({
+      p: new THREE.Vector3(e.x, 0.8 * e.size, e.z),
+      v: new THREE.Vector3(rand(-3, 3), rand(3, 7), rand(-3, 3)).multiplyScalar(Math.sqrt(e.size)),
+      life: rand(0.4, 0.8),
+      color: e.color,
+    });
+  }
+}
 
 // Health bars: a dark backing plus a fill, both instanced and facing the camera.
 const BAR_W = 0.9, BAR_H = 0.12;
@@ -232,6 +322,7 @@ const barFill = makeBars(0xffffff, 11);
 
 const tmp = new THREE.Object3D();
 const tmpColor = new THREE.Color();
+const WHITE = new THREE.Color(0xffffff), HURT = new THREE.Color(0x8a1030);
 
 // ---------- Spawning ----------
 const rand = (a: number, b: number) => a + Math.random() * (b - a);
@@ -275,10 +366,10 @@ function spawnEnemy(kind: EnemyKind, cx?: number, z = SPAWN_Z + rand(-5, 0)) {
   if (enemies.length >= MAX_ENEMIES) return;
   const t = ENEMY_TYPES[kind];
   // HP = base x gentle wave growth x your power x how easily you're winning.
-  // Bosses are sized to take ~(10 + 0.8 x wave) seconds of your full firepower.
+  // Bosses are sized to take ~(9 + 0.7 x wave) seconds of your full firepower.
   const maxHp = kind === 'boss'
-    ? Math.round(Math.max(t.hp, playerDps() * (10 + wave * 0.8)) * heat)
-    : Math.round(t.hp * Math.pow(1.05, wave - 1) * powerScale() * heat * rand(0.9, 1.1));
+    ? Math.round(Math.max(t.hp, playerDps() * (9 + wave * 0.7)) * heat)
+    : Math.round(t.hp * Math.pow(1.045, wave - 1) * powerScale() * heat * rand(0.9, 1.1));
   const edge = ROAD_HALF - 0.4 * t.size;
   enemies.push({
     x: kind === 'boss' ? 0 : THREE.MathUtils.clamp(cx ?? rand(-edge, edge), -edge, edge),
@@ -286,7 +377,7 @@ function spawnEnemy(kind: EnemyKind, cx?: number, z = SPAWN_Z + rand(-5, 0)) {
     hp: Math.max(1, maxHp), maxHp: Math.max(1, maxHp),
     speed: rand(6, 7.5) * (1 + (wave - 1) * 0.04) * t.speed,
     wobble: Math.random() * 10,
-    kind, size: t.size, color: new THREE.Color(t.color), dmg: t.dmg, points: t.points,
+    kind, size: t.size, color: new THREE.Color(t.color), dmg: t.dmg, points: t.points, flash: 0,
   });
 }
 
@@ -401,7 +492,7 @@ function updateHud() {
 }
 
 function reset() {
-  bullets = []; enemies = [];
+  bullets = []; enemies = []; particles = [];
   rows.forEach(removeRow); rows = [];
   crates.forEach(removeCrate); crates = [];
   playerX = targetX = 0;
@@ -466,6 +557,9 @@ function update(dt: number) {
   playerX += (targetX - playerX) * Math.min(1, dt * 14);
   player.position.x = playerX;
   body.rotation.z = (playerX - targetX) * 0.3;
+  // Shuffle the legs while strafing.
+  const strafe = Math.min(1, Math.abs(targetX - playerX) * 3);
+  playerLegs.forEach((l, i) => (l.rotation.x = Math.sin(time * 18 + i * Math.PI) * 0.6 * strafe));
 
   // Spawners: difficulty ramps with time.
   if (time >= wave * WAVE_SECONDS) startWave(wave + 1);
@@ -535,8 +629,10 @@ function update(dt: number) {
       if (e.hp > 0 && Math.abs(b.x - e.x) < 0.55 * e.size + 0.1 && e.z > b.z - 0.6 * e.size && e.z < prevZ + 0.6 * e.size) {
         b.alive = false;
         e.hp -= damage;
+        e.flash = 0.08;
         if (e.hp <= 0) {
           score += e.points;
+          burst(e);
           killDepth += (e.z - killDepth) * 0.05;
         }
         break;
@@ -561,7 +657,7 @@ function update(dt: number) {
   enemies = enemies.filter((e) => e.hp > 0);
 
   // Killing far away (killDepth < -40) = cruising, so heat rises; close calls cool it fast.
-  if (killDepth < -40) heat += dt * 0.03;
+  if (killDepth < -40) heat += dt * 0.025;
   else if (killDepth > -20) heat -= dt * 0.1;
   heat = THREE.MathUtils.clamp(heat, HEAT_MIN, HEAT_MAX);
 
@@ -590,19 +686,63 @@ function render(dt: number) {
   bulletMesh.count = bullets.length;
   bulletMesh.instanceMatrix.needsUpdate = true;
 
-  for (let i = 0; i < enemies.length; i++) {
-    const e = enemies[i];
-    tmp.position.set(e.x, 0.6 * e.size + Math.abs(Math.sin(time * 8 + e.wobble)) * 0.15, e.z);
-    tmp.rotation.set(0.35, 0, Math.sin(time * 10 + e.wobble) * 0.15);
+  const counts: Record<string, number> = {};
+  for (const k in enemyMeshes) counts[k] = 0;
+  const legTmp = new THREE.Object3D();
+  for (const e of enemies) {
+    const m = enemyMeshes[e.kind];
+    const i = counts[e.kind]++;
+    const phase = time * 12 * e.speed / 6 + e.wobble;
+    e.flash = Math.max(0, e.flash - dt);
+    tmpColor.copy(e.color).lerp(WHITE, e.flash > 0 ? 0.8 : 0);
+
+    tmp.position.set(e.x, Math.abs(Math.sin(phase)) * 0.08 * e.size, e.z);
+    tmp.rotation.set(0.2, 0, Math.sin(phase) * 0.08);
     tmp.scale.setScalar(e.size);
     tmp.updateMatrix();
-    enemyMesh.setMatrixAt(i, tmp.matrix);
-    enemyMesh.setColorAt(i, e.color);
+    m.body.setMatrixAt(i, tmp.matrix);
+    m.accent.setMatrixAt(i, tmp.matrix);
+    m.body.setColorAt(i, tmpColor);
+
+    // Legs swing in opposite phase from the hips.
+    for (const [mesh, side] of [[m.legL, -1], [m.legR, 1]] as const) {
+      legTmp.position.set(side * 0.13, HIP_Y, 0);
+      legTmp.rotation.set(Math.sin(phase + (side > 0 ? Math.PI : 0)) * 0.7, 0, 0);
+      legTmp.updateMatrix();
+      legTmp.matrix.premultiply(tmp.matrix);
+      mesh.setMatrixAt(i, legTmp.matrix);
+      mesh.setColorAt(i, tmpColor.copy(e.color).multiplyScalar(0.7));
+    }
   }
+  for (const k in enemyMeshes) {
+    for (const mesh of Object.values(enemyMeshes[k])) {
+      mesh.count = counts[k];
+      mesh.visible = counts[k] > 0;
+      mesh.instanceMatrix.needsUpdate = true;
+      if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
+    }
+  }
+
+  // Particles: simple gravity and shrink.
+  particles = particles.filter((p) => (p.life -= dt) > 0);
+  particles.forEach((p, i) => {
+    p.v.y -= 20 * dt;
+    p.p.addScaledVector(p.v, dt);
+    if (p.p.y < 0.07) { p.p.y = 0.07; p.v.multiplyScalar(0.5); p.v.y *= -0.5; }
+    tmp.position.copy(p.p);
+    tmp.rotation.set(p.life * 10, p.life * 7, 0);
+    tmp.scale.setScalar(Math.min(1, p.life * 2.5));
+    tmp.updateMatrix();
+    particleMesh.setMatrixAt(i, tmp.matrix);
+    particleMesh.setColorAt(i, p.color);
+  });
+  particleMesh.count = particles.length;
+  particleMesh.instanceMatrix.needsUpdate = true;
+  if (particleMesh.instanceColor) particleMesh.instanceColor.needsUpdate = true;
   for (let i = 0; i < enemies.length; i++) {
     const e = enemies[i];
     const frac = Math.max(0, e.hp / e.maxHp);
-    const y = 1.55 * e.size + 0.1;
+    const y = (e.kind === 'boss' ? 2.1 : 1.8) * e.size + 0.15;
     tmp.quaternion.copy(camera.quaternion);
     tmp.rotation.setFromQuaternion(tmp.quaternion);
     tmp.position.set(e.x, y, e.z);
@@ -623,12 +763,9 @@ function render(dt: number) {
     m.instanceMatrix.needsUpdate = true;
   }
   if (barFill.instanceColor) barFill.instanceColor.needsUpdate = true;
-  enemyMesh.count = enemies.length;
-  enemyMesh.instanceMatrix.needsUpdate = true;
-  if (enemyMesh.instanceColor) enemyMesh.instanceColor.needsUpdate = true;
 
   hurtFlash = Math.max(0, hurtFlash - dt);
-  (scene.background as THREE.Color).setRGB(0.1 + hurtFlash * 1.5, 0.06, 0.25);
+  (scene.background as THREE.Color).copy(SKY).lerp(HURT, Math.min(1, hurtFlash * 2.5));
 
   renderer.render(scene, camera);
 }
