@@ -226,17 +226,22 @@ let crates: Crate[] = [];
 let playerX = 0, targetX = 0;
 let lives = PLAYER_LIVES, score = 0, time = 0, wave = 0;
 
-// ---------- Adaptive difficulty ----------
-// Enemy toughness follows the player's power, not just the clock, so getting
-// strong early doesn't trivialise later waves and bosses.
+// ---------- Difficulty director ----------
+// One knob instead of stacked multipliers: the game sends a stream of enemy HP per
+// second equal to a fraction ("pressure") of your firepower. Get stronger and more
+// comes at you, but never faster than you can grow. Pressure rises gently per wave
+// and nudges up/down with how comfortably you're winning.
 const BASE_DPS = 5; // starting loadout: 1 shot x 1 dmg x 5/s
 const playerDps = () => shotsPerVolley() * damage * fireRate;
-// Sublinear, so upgrades still feel good: doubling your DPS raises enemy HP ~52%.
-const powerScale = () => Math.pow(playerDps() / BASE_DPS, 0.6);
-// "Heat" tracks how comfortably you're winning. Killing enemies far up the road
-// pushes it up; letting them get close or losing hearts pulls it down.
-let heat = 1, killDepth = -30;
-const HEAT_MIN = 0.6, HEAT_MAX = 2.2;
+// Individual enemies get only mildly tankier (sqrt); extra power mostly means *more* enemies.
+const hpScale = () => Math.sqrt(playerDps() / BASE_DPS);
+// Not every bullet lands (the gun is narrower than the road), so pressure stays well under 1.
+const wavePressure = () => Math.min(0.85, 0.5 + 0.025 * (wave - 1));
+// Performance nudge: killing far up the road pushes it up, close calls / lost hearts pull it down.
+let perf = 1, killDepth = -30;
+const PERF_MIN = 0.7, PERF_MAX = 1.3;
+const pressure = () => wavePressure() * perf;
+let hpBudget = 0;
 let fireRate = 5, gunCount = 1, gateBonus = 0, damage = 1, bulletSpeed = 30;
 let fireTimer = 0, enemyTimer = 0, rowTimer = 2, crateTimer = 6;
 let hurtFlash = 0;
@@ -362,14 +367,13 @@ function spawnRow() {
 
 const WAVE_SECONDS = 20;
 
-function spawnEnemy(kind: EnemyKind, cx?: number, z = SPAWN_Z + rand(-5, 0)) {
-  if (enemies.length >= MAX_ENEMIES) return;
+function spawnEnemy(kind: EnemyKind, cx?: number, z = SPAWN_Z + rand(-5, 0)): number {
+  if (enemies.length >= MAX_ENEMIES) return 0;
   const t = ENEMY_TYPES[kind];
-  // HP = base x gentle wave growth x your power x how easily you're winning.
-  // Bosses are sized to take ~(9 + 0.7 x wave) seconds of your full firepower.
+  // Bosses take ~(8 + 0.4 x wave) seconds of your full firepower; others scale gently with power.
   const maxHp = kind === 'boss'
-    ? Math.round(Math.max(t.hp, playerDps() * (9 + wave * 0.7)) * heat)
-    : Math.round(t.hp * Math.pow(1.045, wave - 1) * powerScale() * heat * rand(0.9, 1.1));
+    ? Math.round(Math.max(t.hp, playerDps() * (8 + wave * 0.4)) * perf)
+    : Math.round(t.hp * hpScale() * rand(0.9, 1.1));
   const edge = ROAD_HALF - 0.4 * t.size;
   enemies.push({
     x: kind === 'boss' ? 0 : THREE.MathUtils.clamp(cx ?? rand(-edge, edge), -edge, edge),
@@ -379,6 +383,7 @@ function spawnEnemy(kind: EnemyKind, cx?: number, z = SPAWN_Z + rand(-5, 0)) {
     wobble: Math.random() * 10,
     kind, size: t.size, color: new THREE.Color(t.color), dmg: t.dmg, points: t.points, flash: 0,
   });
+  return Math.max(1, maxHp);
 }
 
 function randomKind(): EnemyKind {
@@ -399,7 +404,7 @@ function startWave(n: number) {
 
 function spawnCrate() {
   const kind = pick<UpgradeKind>(['rate', 'gun', 'dmg', 'speed']);
-  const maxHp = Math.round((30 + playerDps() * 5) * Math.sqrt(heat)); // ~5s of focused fire
+  const maxHp = Math.round((30 + playerDps() * 4) * perf); // ~4s of focused fire
   const mesh = new THREE.Mesh(
     new THREE.BoxGeometry(1.6, 1.6, 1.6),
     new THREE.MeshStandardMaterial({ color: 0x8a6a4a }),
@@ -488,7 +493,7 @@ function updateHud() {
   $('score').textContent = String(score);
   $('lives').textContent = '♥'.repeat(Math.max(lives, 0)) + '♡'.repeat(PLAYER_LIVES - Math.max(lives, 0));
   $('stats').innerHTML =
-    `wave ${wave} · heat ${heat.toFixed(2)}<br>shots ${shotsPerVolley()} · dmg ${damage}<br>rate ${fireRate.toFixed(1)}/s · spd ${bulletSpeed.toFixed(0)}<br>bullets ${bullets.length}`;
+    `wave ${wave} · pressure ${pressure().toFixed(2)}<br>shots ${shotsPerVolley()} · dmg ${damage}<br>rate ${fireRate.toFixed(1)}/s · spd ${bulletSpeed.toFixed(0)}<br>bullets ${bullets.length}`;
 }
 
 function reset() {
@@ -497,7 +502,7 @@ function reset() {
   crates.forEach(removeCrate); crates = [];
   playerX = targetX = 0;
   lives = PLAYER_LIVES; score = 0; time = 0; wave = 0;
-  heat = 1; killDepth = -30;
+  perf = 1; killDepth = -30; hpBudget = 0;
   fireRate = 5; gunCount = 1; gateBonus = 0; damage = 1; bulletSpeed = 30;
   fireTimer = 0; enemyTimer = 2; rowTimer = 0.5; crateTimer = 6;
   rebuildGuns();
@@ -563,15 +568,19 @@ function update(dt: number) {
 
   // Spawners: difficulty ramps with time.
   if (time >= wave * WAVE_SECONDS) startWave(wave + 1);
+  // Accrue enemy HP to send; a living boss halves the flow so the fight stays focused.
+  const bossAlive = enemies.some((e) => e.kind === 'boss');
+  hpBudget += playerDps() * pressure() * (bossAlive ? 0.5 : 1) * dt;
   enemyTimer -= dt;
   if (enemyTimer <= 0) {
-    // Enemies arrive in packs that bunch up in one area, so you have to pick a lane.
-    const pack = Math.round((2 + wave * 2 + Math.random() * 3) * Math.sqrt(heat));
+    // Spend the budget as a pack bunched in one area, so you have to pick a lane.
     const cx = rand(-ROAD_HALF + 1, ROAD_HALF - 1);
-    for (let i = 0; i < pack; i++) {
-      spawnEnemy(randomKind(), cx + rand(-1.6, 1.6), SPAWN_Z - Math.floor(i / 4) * 1.2 + rand(-0.3, 0.3));
+    let i = 0;
+    while (hpBudget > 0 && i < 40) {
+      hpBudget -= spawnEnemy(randomKind(), cx + rand(-1.6, 1.6), SPAWN_Z - Math.floor(i / 4) * 1.2 + rand(-0.3, 0.3));
+      i++;
     }
-    enemyTimer = Math.max(0.8, 2.2 * Math.pow(0.93, wave - 1));
+    enemyTimer = rand(1.8, 2.6);
   }
   rowTimer -= dt;
   if (rowTimer <= 0) { spawnRow(); rowTimer = rand(6, 8); }
@@ -649,17 +658,17 @@ function update(dt: number) {
     if (e.z > -0.3) {
       e.hp = 0;
       lives -= e.dmg;
-      heat = Math.max(HEAT_MIN, heat * 0.85);
+      perf = Math.max(PERF_MIN, perf - 0.1);
       hurtFlash = 0.3;
       navigator.vibrate?.(120);
     }
   }
   enemies = enemies.filter((e) => e.hp > 0);
 
-  // Killing far away (killDepth < -40) = cruising, so heat rises; close calls cool it fast.
-  if (killDepth < -40) heat += dt * 0.025;
-  else if (killDepth > -20) heat -= dt * 0.1;
-  heat = THREE.MathUtils.clamp(heat, HEAT_MIN, HEAT_MAX);
+  // Killing far away = cruising, so perf creeps up; close calls ease it back down.
+  if (killDepth < -40) perf += dt * 0.01;
+  else if (killDepth > -22) perf -= dt * 0.03;
+  perf = THREE.MathUtils.clamp(perf, PERF_MIN, PERF_MAX);
 
   // Crates: catch opened ones, lose them if they slip by.
   crates = crates.filter((c) => {
