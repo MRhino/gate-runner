@@ -32,3 +32,10 @@ html, body {
   background: #ffd23f; color: #2a1a00; box-shadow: 0 6px 0 #b3541e;
 }
 #start:active { transform: translateY(4px); box-shadow: 0 2px 0 #b3541e; }
+#banner {
+  position: fixed; left: 0; right: 0; top: 28%; text-align: center;
+  font-size: 36px; font-weight: 900; letter-spacing: 3px; color: #ffd23f;
+  text-shadow: 0 4px 0 #b3541e, 0 0 20px #000; pointer-events: none;
+  opacity: 0; transform: scale(.8); transition: opacity .3s, transform .3s;
+}
+#banner.show { opacity: 1; transform: scale(1); }

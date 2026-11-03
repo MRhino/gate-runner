@@ -122,7 +122,19 @@ function makeLabel(w = 256, h = 128) {
 type GateOp = { n: number }; // +n or -n bullets per volley
 type GateRow = { z: number; passed: boolean; mid: number; ops: [GateOp, GateOp]; meshes: THREE.Mesh[] };
 type Bullet = { x: number; z: number; vx: number; alive: boolean };
-type Enemy = { x: number; z: number; hp: number; maxHp: number; speed: number; wobble: number };
+type EnemyKind = 'grunt' | 'runner' | 'brute' | 'boss';
+type Enemy = {
+  x: number; z: number; hp: number; maxHp: number; speed: number; wobble: number;
+  kind: EnemyKind; size: number; hue: number; dmg: number; points: number;
+};
+
+// Per-type multipliers on top of the wave's base HP and speed.
+const ENEMY_TYPES: Record<EnemyKind, { hp: number; speed: number; size: number; hue: number; dmg: number; points: number }> = {
+  grunt: { hp: 1, speed: 1, size: 1, hue: 0.98, dmg: 1, points: 10 },
+  runner: { hp: 0.5, speed: 1.8, size: 0.75, hue: 0.13, dmg: 1, points: 15 },
+  brute: { hp: 4, speed: 0.6, size: 1.7, hue: 0.78, dmg: 2, points: 40 },
+  boss: { hp: 30, speed: 0.4, size: 3, hue: 0.0, dmg: 3, points: 300 },
+};
 type UpgradeKind = 'rate' | 'gun' | 'dmg' | 'speed';
 type Crate = {
   x: number; z: number; hp: number; maxHp: number; open: boolean; kind: UpgradeKind;
@@ -142,7 +154,7 @@ let enemies: Enemy[] = [];
 let rows: GateRow[] = [];
 let crates: Crate[] = [];
 let playerX = 0, targetX = 0;
-let lives = PLAYER_LIVES, score = 0, time = 0;
+let lives = PLAYER_LIVES, score = 0, time = 0, wave = 0;
 let fireRate = 3, gunCount = 1, gateBonus = 0, damage = 1, bulletSpeed = 30;
 let fireTimer = 0, enemyTimer = 0, rowTimer = 2, crateTimer = 6;
 let hurtFlash = 0;
@@ -225,18 +237,35 @@ function spawnRow() {
   rows.push({ z: SPAWN_Z, passed: false, mid, ops, meshes });
 }
 
-function spawnEnemy() {
+const WAVE_SECONDS = 20;
+
+function spawnEnemy(kind: EnemyKind) {
   if (enemies.length >= MAX_ENEMIES) return;
-  const tier = Math.floor(time / 25);
+  const t = ENEMY_TYPES[kind];
+  // HP grows ~30% per wave, speed ~5% per wave: slow start, steep later.
+  const maxHp = Math.round(3 * Math.pow(1.3, wave - 1) * t.hp * rand(0.8, 1.2));
+  const edge = ROAD_HALF - 0.4 * t.size;
   enemies.push({
-    x: rand(-ROAD_HALF + 0.5, ROAD_HALF - 0.5),
+    x: kind === 'boss' ? 0 : rand(-edge, edge),
     z: SPAWN_Z + rand(-5, 0),
-    hp: 0, maxHp: 2 + tier * 2 + Math.floor(Math.random() * (2 + tier)),
-    speed: rand(3, 4.5) + tier * 0.3,
+    hp: Math.max(1, maxHp), maxHp: Math.max(1, maxHp),
+    speed: rand(3, 4) * (1 + (wave - 1) * 0.05) * t.speed,
     wobble: Math.random() * 10,
+    kind, size: t.size, hue: t.hue, dmg: t.dmg, points: t.points,
   });
-  const e = enemies[enemies.length - 1];
-  e.hp = e.maxHp;
+}
+
+function randomKind(): EnemyKind {
+  const roll = Math.random();
+  if (wave >= 3 && roll < Math.min(0.25, 0.05 * (wave - 2))) return 'brute';
+  if (wave >= 2 && roll < 0.45) return 'runner';
+  return 'grunt';
+}
+
+function startWave(n: number) {
+  wave = n;
+  if (wave % 5 === 0) spawnEnemy('boss');
+  showBanner(wave % 5 === 0 ? `WAVE ${wave} · BOSS` : `WAVE ${wave}`);
 }
 
 function spawnCrate() {
@@ -316,11 +345,20 @@ const $ = (id: string) => document.getElementById(id)!;
 const overlay = $('overlay'), startBtn = $('start');
 const best = () => Number(localStorage.getItem('gate-runner-best') ?? 0);
 
+let bannerTimeout = 0;
+function showBanner(text: string) {
+  const el = $('banner');
+  el.textContent = text;
+  el.classList.add('show');
+  clearTimeout(bannerTimeout);
+  bannerTimeout = window.setTimeout(() => el.classList.remove('show'), 1800);
+}
+
 function updateHud() {
   $('score').textContent = String(score);
   $('lives').textContent = '♥'.repeat(Math.max(lives, 0)) + '♡'.repeat(PLAYER_LIVES - Math.max(lives, 0));
   $('stats').innerHTML =
-    `shots ${shotsPerVolley()} · dmg ${damage}<br>rate ${fireRate.toFixed(1)}/s · spd ${bulletSpeed.toFixed(0)}<br>bullets ${bullets.length}`;
+    `wave ${wave} · shots ${shotsPerVolley()} · dmg ${damage}<br>rate ${fireRate.toFixed(1)}/s · spd ${bulletSpeed.toFixed(0)}<br>bullets ${bullets.length}`;
 }
 
 function reset() {
@@ -328,7 +366,7 @@ function reset() {
   rows.forEach(removeRow); rows = [];
   crates.forEach(removeCrate); crates = [];
   playerX = targetX = 0;
-  lives = PLAYER_LIVES; score = 0; time = 0;
+  lives = PLAYER_LIVES; score = 0; time = 0; wave = 0;
   fireRate = 3; gunCount = 1; gateBonus = 0; damage = 1; bulletSpeed = 30;
   fireTimer = 0; enemyTimer = 0; rowTimer = 1.5; crateTimer = 6;
   rebuildGuns();
@@ -345,7 +383,7 @@ function gameOver() {
   state = 'over';
   if (score > best()) localStorage.setItem('gate-runner-best', String(score));
   overlay.querySelector('h1')!.textContent = 'OVERRUN';
-  overlay.querySelector('p')!.textContent = `Score ${score}`;
+  overlay.querySelector('p')!.textContent = `Score ${score} · reached wave ${wave}`;
   startBtn.textContent = 'PLAY AGAIN';
   $('best').textContent = `Best ${best()}`;
   overlay.classList.remove('hidden');
@@ -369,11 +407,12 @@ function update(dt: number) {
   body.rotation.z = (playerX - targetX) * 0.3;
 
   // Spawners: difficulty ramps with time.
+  if (time >= wave * WAVE_SECONDS) startWave(wave + 1);
   enemyTimer -= dt;
   if (enemyTimer <= 0) {
-    const burst = 1 + Math.floor(time / 20);
-    for (let i = 0; i < burst; i++) spawnEnemy();
-    enemyTimer = Math.max(0.35, 1.6 - time * 0.015);
+    const burst = 1 + Math.floor((wave - 1) / 2);
+    for (let i = 0; i < burst; i++) spawnEnemy(randomKind());
+    enemyTimer = Math.max(0.4, 1.6 * Math.pow(0.92, wave - 1));
   }
   rowTimer -= dt;
   if (rowTimer <= 0) { spawnRow(); rowTimer = rand(3.5, 5); }
@@ -435,7 +474,7 @@ function update(dt: number) {
       if (e.hp > 0 && Math.abs(b.x - e.x) < 0.45 && Math.abs(b.z - e.z) < 0.5) {
         b.alive = false;
         e.hp -= damage;
-        if (e.hp <= 0) score += 10;
+        if (e.hp <= 0) score += e.points;
         break;
       }
     }
@@ -446,10 +485,10 @@ function update(dt: number) {
   for (const e of enemies) {
     if (e.hp <= 0) continue;
     e.z += e.speed * dt;
-    e.x += Math.sin(time * 2 + e.wobble) * dt * 0.4;
+    if (e.kind !== 'boss') e.x += Math.sin(time * 2 + e.wobble) * dt * 0.4;
     if (e.z > -0.3) {
       e.hp = 0;
-      lives -= 1;
+      lives -= e.dmg;
       hurtFlash = 0.3;
       navigator.vibrate?.(120);
     }
@@ -483,24 +522,25 @@ function render(dt: number) {
 
   for (let i = 0; i < enemies.length; i++) {
     const e = enemies[i];
-    tmp.position.set(e.x, 0.6 + Math.abs(Math.sin(time * 8 + e.wobble)) * 0.15, e.z);
-    tmp.scale.setScalar(1 + Math.min(e.hp, 20) * 0.03); // tougher enemies look bigger
+    tmp.position.set(e.x, 0.6 * e.size + Math.abs(Math.sin(time * 8 + e.wobble)) * 0.15, e.z);
+    tmp.scale.setScalar(e.size);
     tmp.updateMatrix();
     enemyMesh.setMatrixAt(i, tmp.matrix);
-    enemyMesh.setColorAt(i, tmpColor.setHSL(0.98 - Math.min(e.hp, 20) * 0.02, 0.8, 0.55));
+    enemyMesh.setColorAt(i, tmpColor.setHSL(e.hue, 0.8, e.kind === 'boss' ? 0.35 : 0.55));
   }
   for (let i = 0; i < enemies.length; i++) {
     const e = enemies[i];
     const frac = Math.max(0, e.hp / e.maxHp);
-    const y = 1.55 + Math.min(e.hp, 20) * 0.03;
+    const y = 1.55 * e.size + 0.1;
     tmp.quaternion.copy(camera.quaternion);
     tmp.position.set(e.x, y, e.z);
-    tmp.scale.set(BAR_W + 0.06, BAR_H + 0.06, 1);
+    const w = BAR_W * Math.max(1, e.size * 0.8);
+    tmp.scale.set(w + 0.06, BAR_H + 0.06, 1);
     tmp.updateMatrix();
     barBack.setMatrixAt(i, tmp.matrix);
     // Left-align the fill so it shrinks toward the left as HP drops.
-    tmp.position.x = e.x - (BAR_W * (1 - frac)) / 2;
-    tmp.scale.set(BAR_W * frac, BAR_H, 1);
+    tmp.position.x = e.x - (w * (1 - frac)) / 2;
+    tmp.scale.set(w * frac, BAR_H, 1);
     tmp.updateMatrix();
     barFill.setMatrixAt(i, tmp.matrix);
     barFill.setColorAt(i, tmpColor.setHSL(frac * 0.33, 0.9, 0.5)); // red -> green
