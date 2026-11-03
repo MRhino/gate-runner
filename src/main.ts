@@ -175,12 +175,12 @@ let lives = PLAYER_LIVES, score = 0, time = 0, wave = 0;
 // strong early doesn't trivialise later waves and bosses.
 const BASE_DPS = 5; // starting loadout: 1 shot x 1 dmg x 5/s
 const playerDps = () => shotsPerVolley() * damage * fireRate;
-// Sublinear, so upgrades still feel good: doubling your DPS raises enemy HP ~70%.
-const powerScale = () => Math.pow(playerDps() / BASE_DPS, 0.75);
+// Sublinear, so upgrades still feel good: doubling your DPS raises enemy HP ~57%.
+const powerScale = () => Math.pow(playerDps() / BASE_DPS, 0.65);
 // "Heat" tracks how comfortably you're winning. Killing enemies far up the road
 // pushes it up; letting them get close or losing hearts pulls it down.
 let heat = 1, killDepth = -30;
-const HEAT_MIN = 0.6, HEAT_MAX = 3;
+const HEAT_MIN = 0.6, HEAT_MAX = 2.5;
 let fireRate = 5, gunCount = 1, gateBonus = 0, damage = 1, bulletSpeed = 30;
 let fireTimer = 0, enemyTimer = 0, rowTimer = 2, crateTimer = 6;
 let hurtFlash = 0;
@@ -275,10 +275,10 @@ function spawnEnemy(kind: EnemyKind, cx?: number, z = SPAWN_Z + rand(-5, 0)) {
   if (enemies.length >= MAX_ENEMIES) return;
   const t = ENEMY_TYPES[kind];
   // HP = base x gentle wave growth x your power x how easily you're winning.
-  // Bosses are sized to take ~(12 + wave) seconds of your full firepower.
+  // Bosses are sized to take ~(10 + 0.8 x wave) seconds of your full firepower.
   const maxHp = kind === 'boss'
-    ? Math.round(Math.max(t.hp, playerDps() * (12 + wave)) * heat)
-    : Math.round(t.hp * Math.pow(1.06, wave - 1) * powerScale() * heat * rand(0.9, 1.1));
+    ? Math.round(Math.max(t.hp, playerDps() * (10 + wave * 0.8)) * heat)
+    : Math.round(t.hp * Math.pow(1.05, wave - 1) * powerScale() * heat * rand(0.9, 1.1));
   const edge = ROAD_HALF - 0.4 * t.size;
   enemies.push({
     x: kind === 'boss' ? 0 : THREE.MathUtils.clamp(cx ?? rand(-edge, edge), -edge, edge),
@@ -509,13 +509,14 @@ function update(dt: number) {
 
   // Move bullets, pass gates, hit things.
   for (const b of bullets) {
+    const prevZ = b.z;
     b.z -= bulletSpeed * dt;
     b.x += b.vx * dt;
     if (b.z < SPAWN_Z - 5 || Math.abs(b.x) > ROAD_HALF) { b.alive = false; continue; }
 
     for (const c of crates) {
       // Bullets punch through crates, damaging each crate once on the way.
-      if (!c.open && b.crate !== c && Math.abs(b.x - c.x) < 0.9 && Math.abs(b.z - c.z) < 0.9) {
+      if (!c.open && b.crate !== c && Math.abs(b.x - c.x) < 1 && c.z > b.z - 0.9 && c.z < prevZ + 0.9) {
         b.crate = c;
         c.hp -= damage;
         if (c.hp <= 0) {
@@ -531,7 +532,7 @@ function update(dt: number) {
     }
 
     for (const e of enemies) {
-      if (e.hp > 0 && Math.abs(b.x - e.x) < 0.45 * e.size && Math.abs(b.z - e.z) < 0.5 * e.size) {
+      if (e.hp > 0 && Math.abs(b.x - e.x) < 0.55 * e.size + 0.1 && e.z > b.z - 0.6 * e.size && e.z < prevZ + 0.6 * e.size) {
         b.alive = false;
         e.hp -= damage;
         if (e.hp <= 0) {
@@ -560,7 +561,7 @@ function update(dt: number) {
   enemies = enemies.filter((e) => e.hp > 0);
 
   // Killing far away (killDepth < -40) = cruising, so heat rises; close calls cool it fast.
-  if (killDepth < -40) heat += dt * 0.04;
+  if (killDepth < -40) heat += dt * 0.03;
   else if (killDepth > -20) heat -= dt * 0.1;
   heat = THREE.MathUtils.clamp(heat, HEAT_MIN, HEAT_MAX);
 
