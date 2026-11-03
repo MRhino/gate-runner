@@ -73,7 +73,8 @@ scene.add(sun);
 // Runs at half resolution to keep it cheap on phones.
 const composer = new EffectComposer(renderer);
 composer.addPass(new RenderPass(scene, camera));
-const bloom = new UnrealBloomPass(new THREE.Vector2(256, 256), 0.7, 0.4, 0.8);
+const BLOOM_STRENGTH = 0.7;
+const bloom = new UnrealBloomPass(new THREE.Vector2(256, 256), BLOOM_STRENGTH, 0.4, 0.85);
 composer.addPass(bloom);
 composer.addPass(new OutputPass());
 
@@ -318,7 +319,7 @@ const gunOffsets = () => {
 // ---------- Instanced bullets & enemies ----------
 const bulletMesh = new THREE.InstancedMesh(
   new THREE.CapsuleGeometry(0.08, 0.35, 3, 6).rotateX(Math.PI / 2),
-  new THREE.MeshBasicMaterial({ color: new THREE.Color(0xfff3b0).multiplyScalar(2.2) }), // >1 so it blooms
+  new THREE.MeshBasicMaterial({ color: new THREE.Color(0xfff3b0).multiplyScalar(1.25) }), // just over the bloom threshold: a soft glow, not a flare
   MAX_BULLETS,
 );
 bulletMesh.frustumCulled = false;
@@ -931,6 +932,9 @@ function render(dt: number) {
   hurtFlash = Math.max(0, hurtFlash - dt);
   skyUniforms.hurt.value = Math.min(1, hurtFlash * 2.5);
 
+  // Glow adds up across everything bright on screen, so hundreds of bullets late-game would
+  // white out the view. Ease the bloom off as the bullet count climbs (~halved at 200 bullets).
+  bloom.strength = BLOOM_STRENGTH / (1 + bullets.length / 200);
   composer.render();
 }
 
