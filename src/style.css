@@ -39,3 +39,15 @@ html, body {
   opacity: 0; transform: scale(.8); transition: opacity .3s, transform .3s;
 }
 #banner.show { opacity: 1; transform: scale(1); }
+#mid { display: flex; flex-direction: column; align-items: center; gap: 8px; }
+#pause {
+  pointer-events: auto; width: 44px; height: 44px; border-radius: 50%;
+  border: 2px solid #fff6; background: #0006; color: #fff; font: 900 16px system-ui;
+}
+#paused {
+  position: fixed; inset: 0; display: none; flex-direction: column; align-items: center;
+  justify-content: center; gap: 8px; background: #0b082099; font: 900 40px system-ui;
+  letter-spacing: 4px; color: #ffd23f;
+}
+#paused small { font-size: 14px; letter-spacing: 1px; color: #fff; opacity: .8; }
+#paused.show { display: flex; }

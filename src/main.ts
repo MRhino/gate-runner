@@ -122,18 +122,23 @@ function makeLabel(w = 256, h = 128) {
 type GateOp = { n: number }; // +n or -n bullets per volley
 type GateRow = { z: number; passed: boolean; mid: number; ops: [GateOp, GateOp]; meshes: THREE.Mesh[] };
 type Bullet = { x: number; z: number; vx: number; alive: boolean };
-type EnemyKind = 'grunt' | 'runner' | 'brute' | 'boss';
+type EnemyKind = 'grunt' | 'runner' | 'blue' | 'purple' | 'orange' | 'red' | 'boss';
 type Enemy = {
   x: number; z: number; hp: number; maxHp: number; speed: number; wobble: number;
-  kind: EnemyKind; size: number; hue: number; dmg: number; points: number;
+  kind: EnemyKind; size: number; color: THREE.Color; dmg: number; points: number;
 };
 
-// Per-type multipliers on top of the wave's base HP and speed.
-const ENEMY_TYPES: Record<EnemyKind, { hp: number; speed: number; size: number; hue: number; dmg: number; points: number }> = {
-  grunt: { hp: 1, speed: 1, size: 1, hue: 0.98, dmg: 1, points: 10 },
-  runner: { hp: 0.5, speed: 1.8, size: 0.75, hue: 0.13, dmg: 1, points: 15 },
-  brute: { hp: 4, speed: 0.6, size: 1.7, hue: 0.78, dmg: 2, points: 40 },
-  boss: { hp: 30, speed: 0.4, size: 3, hue: 0.0, dmg: 3, points: 300 },
+// Tougher tiers are rarer: low-HP grunts make up the bulk of every pack, heavies get mixed in.
+// `wave` = first wave the tier can appear; `weight` = relative spawn chance once unlocked.
+type EnemyType = { hp: number; speed: number; size: number; color: number; dmg: number; points: number; wave: number; weight: number };
+const ENEMY_TYPES: Record<EnemyKind, EnemyType> = {
+  grunt: { hp: 2, speed: 1, size: 1, color: 0x4caf50, dmg: 1, points: 10, wave: 1, weight: 60 },
+  runner: { hp: 1, speed: 1.7, size: 0.75, color: 0xffeb3b, dmg: 1, points: 15, wave: 2, weight: 18 },
+  blue: { hp: 10, speed: 0.95, size: 1.15, color: 0x2196f3, dmg: 1, points: 40, wave: 2, weight: 14 },
+  purple: { hp: 25, speed: 0.85, size: 1.35, color: 0x9c27b0, dmg: 1, points: 100, wave: 3, weight: 7 },
+  orange: { hp: 60, speed: 0.75, size: 1.6, color: 0xff7a1a, dmg: 2, points: 250, wave: 5, weight: 4 },
+  red: { hp: 150, speed: 0.65, size: 1.9, color: 0xe53935, dmg: 2, points: 600, wave: 7, weight: 2 },
+  boss: { hp: 600, speed: 0.4, size: 3, color: 0x3a0a0a, dmg: 3, points: 3000, wave: 5, weight: 0 },
 };
 type UpgradeKind = 'rate' | 'gun' | 'dmg' | 'speed';
 type Crate = {
@@ -148,7 +153,7 @@ const UPGRADES: Record<UpgradeKind, { label: string; color: string }> = {
   speed: { label: 'SPD+', color: '#c74bff' },
 };
 
-let state: 'menu' | 'play' | 'over' = 'menu';
+let state: 'menu' | 'play' | 'paused' | 'over' = 'menu';
 let bullets: Bullet[] = [];
 let enemies: Enemy[] = [];
 let rows: GateRow[] = [];
@@ -242,8 +247,8 @@ const WAVE_SECONDS = 20;
 function spawnEnemy(kind: EnemyKind, cx?: number, z = SPAWN_Z + rand(-5, 0)) {
   if (enemies.length >= MAX_ENEMIES) return;
   const t = ENEMY_TYPES[kind];
-  // HP grows ~30% per wave, speed ~5% per wave: slow start, steep later.
-  const maxHp = Math.round(2 * Math.pow(1.3, wave - 1) * t.hp * rand(0.8, 1.2));
+  // Every tier also gets ~12% tougher per wave.
+  const maxHp = Math.round(t.hp * Math.pow(1.12, wave - 1) * rand(0.9, 1.1));
   const edge = ROAD_HALF - 0.4 * t.size;
   enemies.push({
     x: kind === 'boss' ? 0 : THREE.MathUtils.clamp(cx ?? rand(-edge, edge), -edge, edge),
@@ -251,14 +256,17 @@ function spawnEnemy(kind: EnemyKind, cx?: number, z = SPAWN_Z + rand(-5, 0)) {
     hp: Math.max(1, maxHp), maxHp: Math.max(1, maxHp),
     speed: rand(6, 7.5) * (1 + (wave - 1) * 0.04) * t.speed,
     wobble: Math.random() * 10,
-    kind, size: t.size, hue: t.hue, dmg: t.dmg, points: t.points,
+    kind, size: t.size, color: new THREE.Color(t.color), dmg: t.dmg, points: t.points,
   });
 }
 
 function randomKind(): EnemyKind {
-  const roll = Math.random();
-  if (wave >= 3 && roll < Math.min(0.25, 0.05 * (wave - 2))) return 'brute';
-  if (wave >= 2 && roll < 0.45) return 'runner';
+  // Heavier tiers become a bit more common the longer they've been unlocked.
+  const pool = (Object.keys(ENEMY_TYPES) as EnemyKind[])
+    .filter((k) => ENEMY_TYPES[k].weight > 0 && wave >= ENEMY_TYPES[k].wave)
+    .map((k) => [k, ENEMY_TYPES[k].weight * (k === 'grunt' ? 1 : 1 + 0.15 * (wave - ENEMY_TYPES[k].wave))] as const);
+  let roll = Math.random() * pool.reduce((a, [, w]) => a + w, 0);
+  for (const [k, w] of pool) if ((roll -= w) <= 0) return k;
   return 'grunt';
 }
 
@@ -376,8 +384,29 @@ function reset() {
 startBtn.addEventListener('click', () => {
   reset();
   state = 'play';
+  pauseBtn.textContent = 'II';
+  $('paused').classList.remove('show');
   overlay.classList.add('hidden');
 });
+
+const pauseBtn = $('pause');
+function setPaused(p: boolean) {
+  if (p && state !== 'play') return;
+  if (!p && state !== 'paused') return;
+  state = p ? 'paused' : 'play';
+  pauseBtn.textContent = p ? '▶' : 'II';
+  $('paused').classList.toggle('show', p);
+}
+pauseBtn.addEventListener('pointerdown', (e) => {
+  e.stopPropagation();
+  setPaused(state === 'play');
+});
+$('paused').addEventListener('pointerdown', () => setPaused(false));
+addEventListener('keydown', (e) => {
+  if (e.key === 'p' || e.key === 'Escape') setPaused(state === 'play');
+});
+// Auto-pause when the app is backgrounded (phone call, app switch, lock screen).
+document.addEventListener('visibilitychange', () => { if (document.hidden) setPaused(true); });
 
 function gameOver() {
   state = 'over';
@@ -431,8 +460,10 @@ function update(dt: number) {
     for (let i = 0; i < n; i++) {
       const t = n === 1 ? 0 : i / (n - 1) - 0.5; // -0.5..0.5 across the fan
       const spread = Math.min(1.6, 0.2 * n);
+      // Fan by angle, not fixed sideways speed, so faster bullets still cover the road.
+      const angle = t * 2 * Math.min(0.2, 0.04 * n);
       if (bullets.length < MAX_BULLETS) {
-        bullets.push({ x: playerX + t * spread, z: -1, vx: t * Math.min(3, 0.4 * n), alive: true });
+        bullets.push({ x: playerX + t * spread, z: -1, vx: Math.tan(angle) * bulletSpeed, alive: true });
       }
     }
   }
@@ -531,7 +562,7 @@ function render(dt: number) {
     tmp.scale.setScalar(e.size);
     tmp.updateMatrix();
     enemyMesh.setMatrixAt(i, tmp.matrix);
-    enemyMesh.setColorAt(i, tmpColor.setHSL(e.hue, 0.8, e.kind === 'boss' ? 0.35 : 0.55));
+    enemyMesh.setColorAt(i, e.color);
   }
   for (let i = 0; i < enemies.length; i++) {
     const e = enemies[i];
