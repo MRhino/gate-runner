@@ -51,6 +51,23 @@ function flashTexture() {
   return t;
 }
 
+// Damage upgrades show on the weapon: 0 at base damage, approaching 1 as DMG+ stacks up.
+export const powerOf = (damage: number) => 1 - Math.exp(-(damage - 1) / 3);
+// The weapon's own colour pushed to full saturation and brighter, blended in by power.
+function powered(base: THREE.Color, weaponColor: number, p: number, out: THREE.Color) {
+  const hsl = { h: 0, s: 0, l: 0 };
+  new THREE.Color(weaponColor).getHSL(hsl);
+  const hot = new THREE.Color().setHSL(hsl.h, 1, 0.55);
+  out.copy(base).lerp(hot, p * 0.7).multiplyScalar(1 + p * 0.6);
+  // Parts that started under the bloom threshold stay under it, so hundreds of bullets can't
+  // white out the screen; only the additive glow sleeves get visibly hotter.
+  if (Math.max(base.r, base.g, base.b) <= 1) {
+    const m = Math.max(out.r, out.g, out.b);
+    if (m > 0.98) out.multiplyScalar(0.98 / m);
+  }
+  return out;
+}
+
 export function createHero(toon: THREE.Material) {
   const root = new THREE.Group();
   const torso = new THREE.Group(); // everything above the hips; tilts when strafing, bobs when idle
@@ -167,8 +184,16 @@ export function createHero(toon: THREE.Material) {
   let spinner: THREE.Mesh | null = null;
   let weaponKind: WeaponKind = 'blaster';
 
+  let power = 0;
+  // Gun glows in the weapon's colour as damage goes up.
+  function setPower(p: number) {
+    power = p;
+    gunMat.emissive.set(WEAPONS[weaponKind].color).multiplyScalar(p * 0.9);
+  }
+
   function setWeapon(kind: WeaponKind) {
     weaponKind = kind;
+    setPower(power);
     gun.clear();
     const { gun: g, spin, muzzleZ } = buildWeaponGeo(kind, 1.4);
     const m = new THREE.Mesh(g, gunMat);
@@ -221,7 +246,7 @@ export function createHero(toon: THREE.Material) {
   }
 
   setWeapon('blaster');
-  return { root, setWeapon, fire, update };
+  return { root, setWeapon, setPower, fire, update };
 }
 
 // ---------- Squad mates ----------
@@ -263,7 +288,8 @@ export function createSquad(scene: THREE.Scene, toon: THREE.Material, max: numbe
     guns[k] = mk(spin ? merge([{ geo: g }, { geo: spin }]) : g, gunMat, false);
   }
   const o = new THREE.Object3D(), l = new THREE.Object3D();
-  return (mates: { x: number; z: number; recoil: number; spawn: number }[], weapon: WeaponKind, t: number, strafe: number) => {
+  return (mates: { x: number; z: number; recoil: number; spawn: number }[], weapon: WeaponKind, t: number, strafe: number, power = 0) => {
+    gunMat.emissive.set(WEAPONS[weapon].color).multiplyScalar(power * 0.9);
     mates.forEach((m, i) => {
       // Pop in with a little overshoot when they join.
       const c = m.spawn - 1, s = 1 + 2.2 * c * c * c + 1.2 * c * c; // 0 -> overshoot -> 1
@@ -332,14 +358,29 @@ export function createProjectiles(scene: THREE.Scene, max: number) {
   };
   const counts = {} as Record<WeaponKind, number>;
   const o = new THREE.Object3D();
-  return (bullets: { x: number; z: number; w: WeaponKind }[], t: number) => {
+  // Remember each part's base colour so power tints are applied fresh every frame.
+  const bases = new Map<THREE.InstancedMesh, THREE.Color>();
+  for (const k of WEAPON_KINDS) for (const part of sets[k]) {
+    const mat = part.m.material as THREE.MeshBasicMaterial;
+    if (mat.vertexColors === false && mat.color) bases.set(part.m, mat.color.clone());
+  }
+  let lastPower = -1;
+  return (bullets: { x: number; z: number; w: WeaponKind }[], t: number, power = 0) => {
+    if (power !== lastPower) {
+      lastPower = power;
+      for (const k of WEAPON_KINDS) for (const part of sets[k]) {
+        const base = bases.get(part.m);
+        if (base) powered(base, WEAPONS[k].color, power, (part.m.material as THREE.MeshBasicMaterial).color);
+      }
+    }
+    const grow = 1 + power * 0.45;
     for (const k of WEAPON_KINDS) counts[k] = 0;
     for (const b of bullets) {
       const i = counts[b.w]++;
       for (const part of sets[b.w]) {
         o.position.set(b.x, 0.9, b.z + (part.dz ?? 0));
         o.rotation.set(0, 0, b.w === 'rocket' ? t * 12 : 0);
-        o.scale.set(...part.sz);
+        o.scale.set(part.sz[0] * grow, part.sz[1] * grow, part.sz[2] * grow);
         if (b.w === 'rocket' && part.dz) o.scale.z *= 0.8 + Math.random() * 0.4; // flickering exhaust
         o.updateMatrix();
         part.m.setMatrixAt(i, o.matrix);

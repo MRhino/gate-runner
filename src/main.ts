@@ -3,7 +3,7 @@ import { registerSW } from 'virtual:pwa-register';
 import './style.css';
 import { buildEnemyModels, HIP_Y, type EnemyModel } from './models';
 import { createAmbient } from './env';
-import { createHero, createSquad, createProjectiles } from './hero';
+import { createHero, createSquad, createProjectiles, powerOf } from './hero';
 import { createFx } from './fx';
 import { createGateRow, type GateRowVisual } from './gates';
 import { WEAPONS, WEAPON_KINDS, type WeaponKind } from './weapons';
@@ -915,8 +915,10 @@ function update(dt: number) {
 }
 
 function render(dt: number) {
-  drawProjectiles(bullets, time);
-  drawSquad(mates, weapon, time, Math.min(1, Math.abs(targetX - playerX) * 3));
+  const power = powerOf(damage); // DMG+ shows as hotter, more saturated, bigger shots and glowing guns
+  hero.setPower(power);
+  drawProjectiles(bullets, time, power);
+  drawSquad(mates, weapon, time, Math.min(1, Math.abs(targetX - playerX) * 3), power);
   for (const r of rows) r.vis.update(dt, time);
   fx.update(state === 'play' ? dt : 0);
 
