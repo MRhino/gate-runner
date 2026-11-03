@@ -239,7 +239,7 @@ type Bullet = { x: number; z: number; vx: number; alive: boolean; crate?: Crate 
 type EnemyKind = 'grunt' | 'runner' | 'blue' | 'purple' | 'orange' | 'red' | 'boss';
 type Enemy = {
   x: number; z: number; hp: number; maxHp: number; speed: number; wobble: number; fireCd: number;
-  tx: number; retarget: number; // weaving: lateral target and time until a new one is picked
+  tx: number; retarget: number; vx: number; // weaving: lateral target, time until a new one, sideways velocity
   kind: EnemyKind; size: number; color: THREE.Color; dmg: number; points: number; flash: number;
 };
 
@@ -363,13 +363,24 @@ const SHOOTERS: Partial<Record<EnemyKind, { cd: number; spread: number }>> = {
 const SHOT_SPEED = 9;
 type Shot = { x: number; z: number; vx: number; vz: number };
 let shots: Shot[] = [];
-const shotMesh = new THREE.InstancedMesh(
-  new THREE.SphereGeometry(0.22, 12, 8),
-  new THREE.MeshBasicMaterial({ color: new THREE.Color(0xff3df0).multiplyScalar(2.5) }),
-  200,
-);
-shotMesh.frustumCulled = false;
-scene.add(shotMesh);
+// Hot orange/red reads as "danger" against the violet road and your pale-yellow bullets.
+const shotPart = (geo: THREE.BufferGeometry, mat: THREE.Material) => {
+  const m = new THREE.InstancedMesh(geo, mat, 200);
+  m.frustumCulled = false;
+  m.count = 0;
+  scene.add(m);
+  return m;
+};
+const additive = (color: number, k: number, opacity = 1) => new THREE.MeshBasicMaterial({
+  color: new THREE.Color(color).multiplyScalar(k), transparent: true, opacity,
+  blending: THREE.AdditiveBlending, depthWrite: false,
+});
+const shotCore = shotPart(new THREE.SphereGeometry(0.14, 10, 8), new THREE.MeshBasicMaterial({ color: new THREE.Color(0xfff2c0).multiplyScalar(1.6) }));
+const shotHalo = shotPart(new THREE.SphereGeometry(0.3, 12, 8), additive(0xff5a10, 1.4, 0.75));
+// Trail: a cone stretched behind the shot along its direction of travel (a cheap motion blur).
+const shotTrail = shotPart(new THREE.ConeGeometry(0.22, 1, 10, 1, true).rotateX(-Math.PI / 2).translate(0, 0, -0.5), additive(0xff3a00, 1.2, 0.55));
+// Marker on the ground under each shot so you can judge where it'll cross your line.
+const shotMarker = shotPart(new THREE.RingGeometry(0.22, 0.34, 20).rotateX(-Math.PI / 2), additive(0xff4a10, 1, 0.6));
 function enemyFire(e: Enemy) {
   const cfg = SHOOTERS[e.kind];
   if (!cfg) return;
@@ -482,7 +493,7 @@ function spawnEnemy(kind: EnemyKind, cx?: number, z = SPAWN_Z + rand(-5, 0)): nu
     hp: Math.max(1, maxHp), maxHp: Math.max(1, maxHp),
     speed: rand(6, 7.5) * (1 + (wave - 1) * 0.04) * t.speed,
     wobble: Math.random() * 10,
-    tx: 0, retarget: 0, fireCd: rand(1, 2.5),
+    tx: 0, retarget: 0, vx: 0, fireCd: rand(1, 2.5),
     kind, size: t.size, color: new THREE.Color(t.color), dmg: t.dmg, points: t.points, flash: 0,
   });
   return Math.max(1, maxHp);
@@ -771,8 +782,11 @@ function update(dt: number) {
         e.tx = THREE.MathUtils.clamp(e.x + rand(-3, 3) * agility, -edge, edge);
         e.retarget = rand(0.8, 2.5);
       }
-      const dx = e.tx - e.x;
-      e.x += Math.sign(dx) * Math.min(Math.abs(dx), 2.2 * agility * dt);
+      // Steer rather than slide: ease into a sideways speed proportional to the distance left,
+      // so they accelerate out of a lane, drift across, and slow as they settle.
+      const desired = THREE.MathUtils.clamp((e.tx - e.x) * 1.5, -2.2 * agility, 2.2 * agility);
+      e.vx += (desired - e.vx) * Math.min(1, dt * 3);
+      e.x += e.vx * dt;
     }
     // Shoot only once on screen and not point-blank.
     if (e.z > -50 && e.z < -10 && (e.fireCd -= dt) <= 0) {
@@ -843,7 +857,9 @@ function render(dt: number) {
     tmpColor.copy(e.color).lerp(WHITE, e.flash > 0 ? 0.8 : 0);
 
     tmp.position.set(e.x, Math.abs(Math.sin(phase)) * 0.08 * e.size, e.z);
-    tmp.rotation.set(0.2, 0, Math.sin(phase) * 0.08);
+    // Turn to face where they're heading and bank into the turn.
+    const yaw = Math.atan2(e.vx, e.speed);
+    tmp.rotation.set(0.2, yaw, Math.sin(phase) * 0.08 - e.vx * 0.06, 'YXZ');
     tmp.scale.setScalar(e.size);
     tmp.updateMatrix();
     m.body.setMatrixAt(i, tmp.matrix);
@@ -893,14 +909,28 @@ function render(dt: number) {
     particleMesh.setColorAt(i, p.color);
   });
   shots.forEach((sh, i) => {
+    const pulse = 1 + Math.sin(time * 25 + i) * 0.15;
     tmp.position.set(sh.x, 0.9, sh.z);
     tmp.rotation.set(0, 0, 0);
-    tmp.scale.setScalar(1 + Math.sin(time * 20 + i) * 0.15);
+    tmp.scale.setScalar(pulse);
     tmp.updateMatrix();
-    shotMesh.setMatrixAt(i, tmp.matrix);
+    shotCore.setMatrixAt(i, tmp.matrix);
+    shotHalo.setMatrixAt(i, tmp.matrix);
+    // Point the trail back along the velocity; it stretches ~1.6 units behind the orb.
+    tmp.rotation.set(0, Math.atan2(sh.vx, sh.vz), 0);
+    tmp.scale.set(1, 1, 1.6);
+    tmp.updateMatrix();
+    shotTrail.setMatrixAt(i, tmp.matrix);
+    tmp.position.set(sh.x, 0.03, sh.z);
+    tmp.rotation.set(0, 0, 0);
+    tmp.scale.setScalar(pulse);
+    tmp.updateMatrix();
+    shotMarker.setMatrixAt(i, tmp.matrix);
   });
-  shotMesh.count = shots.length;
-  shotMesh.instanceMatrix.needsUpdate = true;
+  for (const m of [shotCore, shotHalo, shotTrail, shotMarker]) {
+    m.count = shots.length;
+    m.instanceMatrix.needsUpdate = true;
+  }
   particleMesh.count = particles.length;
   particleMesh.instanceMatrix.needsUpdate = true;
   if (particleMesh.instanceColor) particleMesh.instanceColor.needsUpdate = true;
