@@ -630,6 +630,13 @@ function reset() {
   fireRate = 5; gunCount = 1; gateBonus = 0; damage = 1; bulletSpeed = 30;
   fireTimer = 0; enemyTimer = 2; rowTimer = 0.5; crateTimer = 6;
   setWeapon('blaster');
+  // Showcase mode: start loaded up via the URL, e.g. ?weapon=rocket&squad=12&dmg=3
+  const q = new URLSearchParams(location.search);
+  const qw = q.get('weapon') as WeaponKind | null;
+  if (qw && WEAPON_KINDS.includes(qw)) setWeapon(qw);
+  if (q.has('squad')) gateBonus = THREE.MathUtils.clamp(Number(q.get('squad')) - 1 || 0, 0, MAX_SHOTS - 1);
+  if (q.has('dmg')) damage = THREE.MathUtils.clamp(Number(q.get('dmg')) || 1, 1, 10);
+  syncSquad();
   updateHud();
 }
 
