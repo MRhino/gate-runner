@@ -2,6 +2,7 @@ import * as THREE from 'three';
 import { registerSW } from 'virtual:pwa-register';
 import './style.css';
 import { buildEnemyModels, buildPlayer, HIP_Y, type EnemyModel } from './models';
+import { createAmbient } from './env';
 import { EffectComposer } from 'three/examples/jsm/postprocessing/EffectComposer.js';
 import { RenderPass } from 'three/examples/jsm/postprocessing/RenderPass.js';
 import { UnrealBloomPass } from 'three/examples/jsm/postprocessing/UnrealBloomPass.js';
@@ -37,12 +38,13 @@ renderer.toneMappingExposure = 1.1;
 document.getElementById('app')!.appendChild(renderer.domElement);
 
 const scene = new THREE.Scene();
-const SKY = new THREE.Color(0x3a1e5a); // fog blends into the sky horizon
-scene.fog = new THREE.Fog(SKY, 30, 78);
+// Fog uses exactly the sky's horizon colour, so the world fades into the sky with no seam.
+const HORIZON = 0x5a2766;
+scene.fog = new THREE.Fog(HORIZON, 35, 125);
 // Gradient sky dome: deep violet overhead fading to a warm dusk glow at the horizon.
 const skyUniforms = {
   top: { value: new THREE.Color(0x0d0828) },
-  horizon: { value: new THREE.Color(0x6a2c6e) },
+  horizon: { value: new THREE.Color(HORIZON) },
   hurt: { value: 0 },
 };
 scene.add(new THREE.Mesh(
@@ -57,7 +59,7 @@ scene.add(new THREE.Mesh(
   }),
 ));
 
-const camera = new THREE.PerspectiveCamera(55, 1, 0.1, 200);
+const camera = new THREE.PerspectiveCamera(55, 1, 0.1, 320);
 camera.position.set(0, 10, 9);
 camera.lookAt(0, 0, -16);
 
@@ -74,8 +76,9 @@ scene.add(sun);
 // Runs at half resolution to keep it cheap on phones.
 const composer = new EffectComposer(renderer);
 composer.addPass(new RenderPass(scene, camera));
-const BLOOM_STRENGTH = 0.7;
-const bloom = new UnrealBloomPass(new THREE.Vector2(256, 256), BLOOM_STRENGTH, 0.4, 0.85);
+// Threshold above 1: only things deliberately made brighter than white glow (flames, shots,
+// lanterns). Plain white like gate and crate text stays crisp.
+const bloom = new UnrealBloomPass(new THREE.Vector2(256, 256), 0.6, 0.4, 1.0);
 composer.addPass(bloom);
 composer.addPass(new OutputPass());
 
@@ -118,13 +121,14 @@ road.receiveShadow = true;
 scene.add(road);
 
 // Ground either side of the road, with scattered rocks and glowing lamp posts.
-for (const side of [-1, 1]) {
+// One huge ground plane (the old side strips ended mid-view, which looked like the world was cut off).
+{
   const ground = new THREE.Mesh(
-    new THREE.PlaneGeometry(40, 200),
+    new THREE.PlaneGeometry(500, 500),
     new THREE.MeshStandardMaterial({ color: 0x1d3a3a, roughness: 1 }),
   );
   ground.rotation.x = -Math.PI / 2;
-  ground.position.set(side * (ROAD_HALF + 20.3), -0.05, -80);
+  ground.position.set(0, -0.05, -100);
   ground.receiveShadow = true;
   scene.add(ground);
 }
@@ -142,20 +146,8 @@ for (const side of [-1, 1]) {
   }
   rocks.castShadow = rocks.receiveShadow = true;
   scene.add(rocks);
-
-  const postMat = new THREE.MeshStandardMaterial({ color: 0x22223a, metalness: 0.6, roughness: 0.4 });
-  const lampMat = new THREE.MeshStandardMaterial({ color: 0xffd6a0, emissive: 0xffb050, emissiveIntensity: 2.5 });
-  for (let z = 4; z > -80; z -= 10) {
-    for (const side of [-1, 1]) {
-      const post = new THREE.Mesh(new THREE.CylinderGeometry(0.08, 0.12, 3, 8), postMat);
-      post.position.set(side * (ROAD_HALF + 0.7), 1.5, z);
-      post.castShadow = true;
-      const lamp = new THREE.Mesh(new THREE.SphereGeometry(0.22, 12, 8), lampMat);
-      lamp.position.set(side * (ROAD_HALF + 0.7), 3.1, z);
-      scene.add(post, lamp);
-    }
-  }
 }
+const updateAmbient = createAmbient(scene, ROAD_HALF);
 
 const stripeMat = new THREE.MeshBasicMaterial({ color: 0x6d5fc0 });
 for (let i = 0; i < 20; i++) {
@@ -320,7 +312,7 @@ const gunOffsets = () => {
 // ---------- Instanced bullets & enemies ----------
 const bulletMesh = new THREE.InstancedMesh(
   new THREE.CapsuleGeometry(0.08, 0.35, 3, 6).rotateX(Math.PI / 2),
-  new THREE.MeshBasicMaterial({ color: new THREE.Color(0xfff3b0).multiplyScalar(1.25) }), // just over the bloom threshold: a soft glow, not a flare
+  new THREE.MeshBasicMaterial({ color: new THREE.Color(0xfff3b0).multiplyScalar(0.95) }), // under the bloom threshold on purpose
   MAX_BULLETS,
 );
 bulletMesh.frustumCulled = false;
@@ -976,9 +968,9 @@ function render(dt: number) {
   hurtFlash = Math.max(0, hurtFlash - dt);
   skyUniforms.hurt.value = Math.min(1, hurtFlash * 2.5);
 
-  // Glow adds up across everything bright on screen, so hundreds of bullets late-game would
-  // white out the view. Ease the bloom off as the bullet count climbs (~halved at 200 bullets).
-  bloom.strength = BLOOM_STRENGTH / (1 + bullets.length / 200);
+  // Fixed strength: scaling it by bullet count made it pump brighter whenever bullets hit things.
+  // Player bullets sit just under the threshold, so hundreds of them can't white out the screen.
+  updateAmbient(dt, performance.now() / 1000); // runs on the menu too, not just in play
   composer.render();
 }
 

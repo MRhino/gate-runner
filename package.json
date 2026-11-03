@@ -1,7 +1,7 @@
 {
   "name": "gate-runner",
   "private": true,
-  "version": "0.19.0",
+  "version": "0.20.0",
   "type": "module",
   "scripts": {
     "icons": "node scripts/make-icons.mjs",
