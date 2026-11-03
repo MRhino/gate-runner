@@ -3,7 +3,7 @@ import { registerSW } from 'virtual:pwa-register';
 import './style.css';
 import { buildEnemyModels, HIP_Y, type EnemyModel } from './models';
 import { createAmbient } from './env';
-import { createHero, createSquad, createProjectiles, powerOf } from './hero';
+import { createHero, createSquad, createProjectiles, tierOf, DAMAGE_TIERS } from './hero';
 import { createFx } from './fx';
 import { createGateRow, type GateRowVisual } from './gates';
 import { WEAPONS, WEAPON_KINDS, type WeaponKind } from './weapons';
@@ -613,7 +613,7 @@ function updateHud() {
   $('score').textContent = String(score);
   $('lives').textContent = '♥'.repeat(Math.max(lives, 0)) + '♡'.repeat(PLAYER_LIVES - Math.max(lives, 0));
   $('stats').innerHTML =
-    `wave ${wave} · pressure ${pressure().toFixed(2)}<br>${WEAPONS[weapon].name} · squad ${shotsPerVolley()} · dmg ${damage}<br>rate ${fireRate.toFixed(1)}/s · spd ${bulletSpeed.toFixed(0)}<br>bullets ${bullets.length}`;
+    `wave ${wave} · pressure ${pressure().toFixed(2)}<br>${WEAPONS[weapon].name} · squad ${shotsPerVolley()} · <span style="color:#${new THREE.Color(DAMAGE_TIERS[tierOf(damage)] || 0xffffff).getHexString()}">dmg ${damage}</span><br>rate ${fireRate.toFixed(1)}/s · spd ${bulletSpeed.toFixed(0)}<br>bullets ${bullets.length}`;
 }
 
 function reset() {
@@ -710,7 +710,12 @@ function collect(c: Crate) {
   if (kind === 'weapon') setWeapon(c.weapon!);
   if (kind === 'rate') fireRate = Math.min(fireRate + 0.75, 12);
   if (kind === 'gun') { gunCount = Math.min(gunCount + 1, 4); syncSquad(); }
-  if (kind === 'dmg') damage += 1;
+  if (kind === 'dmg') {
+    damage += 1;
+    const tc = '#' + new THREE.Color(DAMAGE_TIERS[tierOf(damage)] || 0xffffff).getHexString();
+    fx.text(playerX, 3.3, 0.5, `DMG ${damage}`, tc, 1.1);
+    flashScreen(`${tc}66`);
+  }
   if (kind === 'speed') bulletSpeed = Math.min(bulletSpeed + 4, 50);
   if (kind === 'heal') lives = Math.min(PLAYER_LIVES, lives + 1);
   navigator.vibrate?.(40);
@@ -915,7 +920,7 @@ function update(dt: number) {
 }
 
 function render(dt: number) {
-  const power = powerOf(damage); // DMG+ shows as hotter, more saturated, bigger shots and glowing guns
+  const power = tierOf(damage); // DMG+ tier: new shot colour, bigger shots, glowing guns
   hero.setPower(power);
   drawProjectiles(bullets, time, power);
   drawSquad(mates, weapon, time, Math.min(1, Math.abs(targetX - playerX) * 3), power);

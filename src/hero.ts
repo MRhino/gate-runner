@@ -51,21 +51,19 @@ function flashTexture() {
   return t;
 }
 
-// Damage upgrades show on the weapon: 0 at base damage, approaching 1 as DMG+ stacks up.
-export const powerOf = (damage: number) => 1 - Math.exp(-(damage - 1) / 3);
-// The weapon's own colour pushed to full saturation and brighter, blended in by power.
-function powered(base: THREE.Color, weaponColor: number, p: number, out: THREE.Color) {
-  const hsl = { h: 0, s: 0, l: 0 };
-  new THREE.Color(weaponColor).getHSL(hsl);
-  const hot = new THREE.Color().setHSL(hsl.h, 1, 0.55);
-  out.copy(base).lerp(hot, p * 0.7).multiplyScalar(1 + p * 0.6);
-  // Parts that started under the bloom threshold stay under it, so hundreds of bullets can't
-  // white out the screen; only the additive glow sleeves get visibly hotter.
-  if (Math.max(base.r, base.g, base.b) <= 1) {
-    const m = Math.max(out.r, out.g, out.b);
-    if (m > 0.98) out.multiplyScalar(0.98 / m);
+// Damage upgrades show as loot-style tiers: each DMG+ jumps shots and gun glow to a new,
+// clearly different colour (green -> blue -> purple -> orange -> red) and makes shots bigger.
+export const DAMAGE_TIERS = [0, 0x3dff6e, 0x2f8cff, 0xb04dff, 0xff9a1a, 0xff2a3a];
+export const tierOf = (damage: number) => Math.min(DAMAGE_TIERS.length - 1, Math.max(0, Math.round(damage) - 1));
+// Tier colour for a projectile part. Tier 0 keeps the weapon's own look. Glow sleeves/trails take
+// the tier colour fully; solid cores only take a tint and stay under the bloom threshold.
+function tiered(base: THREE.Color, tier: number, out: THREE.Color) {
+  if (tier === 0) return out.copy(base);
+  const c = new THREE.Color(DAMAGE_TIERS[tier]);
+  if (Math.max(base.r, base.g, base.b) <= 1 && base.r + base.g + base.b > 2.4) {
+    return out.copy(c).lerp(new THREE.Color(1, 1, 1), 0.45).multiplyScalar(0.95); // core: pale tier tint
   }
-  return out;
+  return out.copy(c).multiplyScalar(Math.max(base.r, base.g, base.b) * 1.15);
 }
 
 export function createHero(toon: THREE.Material) {
@@ -185,10 +183,10 @@ export function createHero(toon: THREE.Material) {
   let weaponKind: WeaponKind = 'blaster';
 
   let power = 0;
-  // Gun glows in the weapon's colour as damage goes up.
-  function setPower(p: number) {
-    power = p;
-    gunMat.emissive.set(WEAPONS[weaponKind].color).multiplyScalar(p * 0.9);
+  // Gun glows in the current damage tier's colour.
+  function setPower(tier: number) {
+    power = tier;
+    gunMat.emissive.set(tier ? DAMAGE_TIERS[tier] : 0x000000).multiplyScalar(0.8);
   }
 
   function setWeapon(kind: WeaponKind) {
@@ -289,7 +287,7 @@ export function createSquad(scene: THREE.Scene, toon: THREE.Material, max: numbe
   }
   const o = new THREE.Object3D(), l = new THREE.Object3D();
   return (mates: { x: number; z: number; recoil: number; spawn: number }[], weapon: WeaponKind, t: number, strafe: number, power = 0) => {
-    gunMat.emissive.set(WEAPONS[weapon].color).multiplyScalar(power * 0.9);
+    gunMat.emissive.set(power ? DAMAGE_TIERS[power] : 0x000000).multiplyScalar(0.8);
     mates.forEach((m, i) => {
       // Pop in with a little overshoot when they join.
       const c = m.spawn - 1, s = 1 + 2.2 * c * c * c + 1.2 * c * c; // 0 -> overshoot -> 1
@@ -370,10 +368,10 @@ export function createProjectiles(scene: THREE.Scene, max: number) {
       lastPower = power;
       for (const k of WEAPON_KINDS) for (const part of sets[k]) {
         const base = bases.get(part.m);
-        if (base) powered(base, WEAPONS[k].color, power, (part.m.material as THREE.MeshBasicMaterial).color);
+        if (base) tiered(base, power, (part.m.material as THREE.MeshBasicMaterial).color);
       }
     }
-    const grow = 1 + power * 0.45;
+    const grow = 1 + power * 0.15; // each tier ~15% bigger shots
     for (const k of WEAPON_KINDS) counts[k] = 0;
     for (const b of bullets) {
       const i = counts[b.w]++;
