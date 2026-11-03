@@ -1,7 +1,7 @@
 import * as THREE from 'three';
 import { registerSW } from 'virtual:pwa-register';
 import './style.css';
-import { buildEnemyModels, buildPlayer, HIP_Y } from './models';
+import { buildEnemyModels, buildPlayer, HIP_Y, type EnemyModel } from './models';
 import { EffectComposer } from 'three/examples/jsm/postprocessing/EffectComposer.js';
 import { RenderPass } from 'three/examples/jsm/postprocessing/RenderPass.js';
 import { UnrealBloomPass } from 'three/examples/jsm/postprocessing/UnrealBloomPass.js';
@@ -173,7 +173,16 @@ for (const side of [-1, 1]) {
 
 // ---------- Player ----------
 const player = new THREE.Group();
-const { root: body, legs: playerLegs } = buildPlayer();
+// Cel shading: a 3-step light ramp gives the clean, cartoon look of stylised low-poly packs.
+const toonRamp = (() => {
+  const t = new THREE.DataTexture(new Uint8Array([90, 90, 90, 255, 170, 170, 170, 255, 255, 255, 255, 255]), 3, 1);
+  t.minFilter = t.magFilter = THREE.NearestFilter;
+  t.needsUpdate = true;
+  return t;
+})();
+const toon = () => new THREE.MeshToonMaterial({ vertexColors: true, gradientMap: toonRamp });
+const { root: body, legs: playerLegs } = buildPlayer(toon());
+playerLegs.forEach((l) => (l.rotation.order = 'YXZ', l.rotation.y = Math.PI)); // feet point the way the player faces
 player.add(body);
 const gunMat = new THREE.MeshStandardMaterial({ color: 0x3a3d55, metalness: 0.7, roughness: 0.35 });
 const guns: THREE.Mesh[] = [];
@@ -316,11 +325,16 @@ bulletMesh.frustumCulled = false;
 scene.add(bulletMesh);
 
 // One set of instanced meshes per enemy type: tinted body, untinted accents, and two legs.
-const enemyMat = new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.6 });
-const accentMat = new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.35, metalness: 0.2 });
-type EnemyMeshes = { body: THREE.InstancedMesh; accent: THREE.InstancedMesh; legL: THREE.InstancedMesh; legR: THREE.InstancedMesh };
+const enemyMat = toon();
+const accentMat = toon();
+type EnemyMeshes = {
+  body: THREE.InstancedMesh; accent: THREE.InstancedMesh;
+  legL: THREE.InstancedMesh; legR: THREE.InstancedMesh; armL: THREE.InstancedMesh; armR: THREE.InstancedMesh;
+};
 const enemyMeshes: Record<string, EnemyMeshes> = {};
+const enemyRigs: Record<string, EnemyModel> = {};
 for (const [kind, model] of Object.entries(buildEnemyModels())) {
+  enemyRigs[kind] = model;
   const mk = (geo: THREE.BufferGeometry, mat: THREE.Material) => {
     const m = new THREE.InstancedMesh(geo, mat, MAX_ENEMIES);
     m.castShadow = true;
@@ -332,7 +346,10 @@ for (const [kind, model] of Object.entries(buildEnemyModels())) {
   enemyMeshes[kind] = {
     body: mk(model.body, enemyMat), accent: mk(model.accent, accentMat),
     legL: mk(model.leg, enemyMat), legR: mk(model.leg, enemyMat),
+    armL: mk(model.arm, enemyMat), armR: mk(model.arm, enemyMat),
   };
+  // Shadows from the body and legs are enough; skipping the small parts saves a lot on phones.
+  enemyMeshes[kind].accent.castShadow = enemyMeshes[kind].armL.castShadow = enemyMeshes[kind].armR.castShadow = false;
 }
 
 // Enemy shots: slow glowing orbs fired by the bigger types. Dodge them or lose a heart.
@@ -833,13 +850,23 @@ function render(dt: number) {
     m.body.setColorAt(i, tmpColor);
 
     // Legs swing in opposite phase from the hips.
-    for (const [mesh, side] of [[m.legL, -1], [m.legR, 1]] as const) {
-      legTmp.position.set(side * 0.13, HIP_Y, 0);
-      legTmp.rotation.set(Math.sin(phase + (side > 0 ? Math.PI : 0)) * 0.7, 0, 0);
+    const rig = enemyRigs[e.kind];
+    const limbColor = tmpColor.clone();
+    for (const [leg, arm, side] of [[m.legL, m.armL, -1], [m.legR, m.armR, 1]] as const) {
+      const swing = Math.sin(phase + (side > 0 ? Math.PI : 0));
+      legTmp.position.set(side * rig.hipX, HIP_Y, 0);
+      legTmp.rotation.set(swing * 0.7, 0, 0);
       legTmp.updateMatrix();
       legTmp.matrix.premultiply(tmp.matrix);
-      mesh.setMatrixAt(i, legTmp.matrix);
-      mesh.setColorAt(i, tmpColor.copy(e.color).multiplyScalar(0.7));
+      leg.setMatrixAt(i, legTmp.matrix);
+      leg.setColorAt(i, tmpColor.copy(limbColor).multiplyScalar(0.8));
+      // Arms reach forward and pump opposite to the leg on the same side.
+      legTmp.position.set(side * rig.shoulder[0], rig.shoulder[1], rig.shoulder[2]);
+      legTmp.rotation.set(-0.7 - swing * 0.5, 0, side * 0.15);
+      legTmp.updateMatrix();
+      legTmp.matrix.premultiply(tmp.matrix);
+      arm.setMatrixAt(i, legTmp.matrix);
+      arm.setColorAt(i, limbColor);
     }
   }
   for (const k in enemyMeshes) {
