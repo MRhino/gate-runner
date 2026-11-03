@@ -2,6 +2,10 @@ import * as THREE from 'three';
 import { registerSW } from 'virtual:pwa-register';
 import './style.css';
 import { buildEnemyModels, buildPlayer, HIP_Y } from './models';
+import { EffectComposer } from 'three/examples/jsm/postprocessing/EffectComposer.js';
+import { RenderPass } from 'three/examples/jsm/postprocessing/RenderPass.js';
+import { UnrealBloomPass } from 'three/examples/jsm/postprocessing/UnrealBloomPass.js';
+import { OutputPass } from 'three/examples/jsm/postprocessing/OutputPass.js';
 
 // A new deploy installs in the background and would normally reload the page straight
 // away — mid-run if you'd just tapped play. Defer that reload until you're not playing.
@@ -24,7 +28,7 @@ const PLAYER_LIVES = 5;
 
 // ---------- Renderer / scene ----------
 const renderer = new THREE.WebGLRenderer({ antialias: true });
-renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setPixelRatio(Math.min(devicePixelRatio, 1.75));
 renderer.shadowMap.enabled = true;
 renderer.shadowMap.type = THREE.PCFSoftShadowMap;
 renderer.toneMapping = THREE.ACESFilmicToneMapping;
@@ -32,9 +36,25 @@ renderer.toneMappingExposure = 1.1;
 document.getElementById('app')!.appendChild(renderer.domElement);
 
 const scene = new THREE.Scene();
-const SKY = new THREE.Color(0x24164f);
-scene.background = SKY.clone();
+const SKY = new THREE.Color(0x3a1e5a); // fog blends into the sky horizon
 scene.fog = new THREE.Fog(SKY, 30, 78);
+// Gradient sky dome: deep violet overhead fading to a warm dusk glow at the horizon.
+const skyUniforms = {
+  top: { value: new THREE.Color(0x0d0828) },
+  horizon: { value: new THREE.Color(0x6a2c6e) },
+  hurt: { value: 0 },
+};
+scene.add(new THREE.Mesh(
+  new THREE.SphereGeometry(150, 24, 12),
+  new THREE.ShaderMaterial({
+    side: THREE.BackSide, depthWrite: false, fog: false, uniforms: skyUniforms,
+    vertexShader: 'varying vec3 vP; void main(){ vP = position; gl_Position = projectionMatrix * modelViewMatrix * vec4(position,1.0); }',
+    fragmentShader: `uniform vec3 top; uniform vec3 horizon; uniform float hurt; varying vec3 vP;
+      void main(){ float h = clamp(normalize(vP).y * 2.5, 0.0, 1.0);
+        vec3 c = mix(horizon, top, h); c = mix(c, vec3(0.6,0.05,0.12), hurt);
+        gl_FragColor = vec4(c, 1.0); }`,
+  }),
+));
 
 const camera = new THREE.PerspectiveCamera(55, 1, 0.1, 200);
 camera.position.set(0, 10, 9);
@@ -49,9 +69,19 @@ sun.shadow.bias = -0.0005;
 Object.assign(sun.shadow.camera, { left: -10, right: 10, top: 10, bottom: -40 });
 scene.add(sun);
 
+// Bloom makes the emissive bits (bullets, enemy shots, lamps, visors) glow.
+// Runs at half resolution to keep it cheap on phones.
+const composer = new EffectComposer(renderer);
+composer.addPass(new RenderPass(scene, camera));
+const bloom = new UnrealBloomPass(new THREE.Vector2(256, 256), 0.7, 0.4, 0.8);
+composer.addPass(bloom);
+composer.addPass(new OutputPass());
+
 function resize() {
   const w = innerWidth, h = innerHeight;
   renderer.setSize(w, h);
+  composer.setSize(w, h);
+  bloom.resolution.set(w / 2, h / 2);
   camera.aspect = w / h;
   // Keep the whole road visible on narrow portrait screens.
   camera.fov = w / h < 0.6 ? 62 : 55;
@@ -198,7 +228,7 @@ type GateRow = { z: number; passed: boolean; mid: number; ops: [GateOp, GateOp];
 type Bullet = { x: number; z: number; vx: number; alive: boolean; crate?: Crate };
 type EnemyKind = 'grunt' | 'runner' | 'blue' | 'purple' | 'orange' | 'red' | 'boss';
 type Enemy = {
-  x: number; z: number; hp: number; maxHp: number; speed: number; wobble: number;
+  x: number; z: number; hp: number; maxHp: number; speed: number; wobble: number; fireCd: number;
   tx: number; retarget: number; // weaving: lateral target and time until a new one is picked
   kind: EnemyKind; size: number; color: THREE.Color; dmg: number; points: number; flash: number;
 };
@@ -215,7 +245,7 @@ const ENEMY_TYPES: Record<EnemyKind, EnemyType> = {
   red: { hp: 150, speed: 0.65, size: 1.9, color: 0xe53935, dmg: 2, points: 600, wave: 7, weight: 2 },
   boss: { hp: 350, speed: 0.4, size: 3, color: 0x3a0a0a, dmg: 3, points: 3000, wave: 5, weight: 0 },
 };
-type UpgradeKind = 'rate' | 'gun' | 'dmg' | 'speed';
+type UpgradeKind = 'rate' | 'gun' | 'dmg' | 'speed' | 'heal';
 type Crate = {
   x: number; z: number; hp: number; maxHp: number; open: boolean; kind: UpgradeKind;
   mesh: THREE.Mesh; sprite: THREE.Sprite; draw: (t: string, bg: string, fg?: string) => void;
@@ -226,6 +256,7 @@ const UPGRADES: Record<UpgradeKind, { label: string; color: string }> = {
   gun: { label: 'GUN+', color: '#2f9bff' },
   dmg: { label: 'DMG+', color: '#ff8a29' },
   speed: { label: 'SPD+', color: '#c74bff' },
+  heal: { label: '+♥', color: '#ff4d8d' },
 };
 
 let state: 'menu' | 'play' | 'paused' | 'over' = 'menu';
@@ -243,6 +274,13 @@ let lives = PLAYER_LIVES, score = 0, time = 0, wave = 0;
 // and nudges up/down with how comfortably you're winning.
 const BASE_DPS = 5; // starting loadout: 1 shot x 1 dmg x 5/s
 const playerDps = () => shotsPerVolley() * damage * fireRate;
+// DPS you can put on a single target `width` units wide: only the barrels that fit across it count.
+// A wide gun is great against crowds but doesn't make one big enemy melt any faster.
+function dpsOnTarget(width: number) {
+  const offs = gunOffsets();
+  const gap = offs.length > 1 ? offs[1] - offs[0] : 1;
+  return Math.min(offs.length, Math.floor(width / gap) + 1) * damage * fireRate;
+}
 // Individual enemies get only mildly tankier (sqrt); extra power mostly means *more* enemies.
 const hpScale = () => Math.sqrt(playerDps() / BASE_DPS);
 // Not every bullet lands (the gun is narrower than the road), so pressure stays well under 1.
@@ -271,7 +309,7 @@ const gunOffsets = () => {
 // ---------- Instanced bullets & enemies ----------
 const bulletMesh = new THREE.InstancedMesh(
   new THREE.CapsuleGeometry(0.08, 0.35, 3, 6).rotateX(Math.PI / 2),
-  new THREE.MeshBasicMaterial({ color: 0xfff3b0 }),
+  new THREE.MeshBasicMaterial({ color: new THREE.Color(0xfff3b0).multiplyScalar(2.2) }), // >1 so it blooms
   MAX_BULLETS,
 );
 bulletMesh.frustumCulled = false;
@@ -295,6 +333,35 @@ for (const [kind, model] of Object.entries(buildEnemyModels())) {
     body: mk(model.body, enemyMat), accent: mk(model.accent, accentMat),
     legL: mk(model.leg, enemyMat), legR: mk(model.leg, enemyMat),
   };
+}
+
+// Enemy shots: slow glowing orbs fired by the bigger types. Dodge them or lose a heart.
+const SHOOTERS: Partial<Record<EnemyKind, { cd: number; spread: number }>> = {
+  purple: { cd: 4, spread: 1 },
+  orange: { cd: 3.2, spread: 1 },
+  red: { cd: 2.6, spread: 2 },
+  boss: { cd: 1.6, spread: 3 },
+};
+const SHOT_SPEED = 9;
+type Shot = { x: number; z: number; vx: number; vz: number };
+let shots: Shot[] = [];
+const shotMesh = new THREE.InstancedMesh(
+  new THREE.SphereGeometry(0.22, 12, 8),
+  new THREE.MeshBasicMaterial({ color: new THREE.Color(0xff3df0).multiplyScalar(2.5) }),
+  200,
+);
+shotMesh.frustumCulled = false;
+scene.add(shotMesh);
+function enemyFire(e: Enemy) {
+  const cfg = SHOOTERS[e.kind];
+  if (!cfg) return;
+  // Aim at where you are now; multi-shot types fan out so you have to pick a gap.
+  for (let i = 0; i < cfg.spread; i++) {
+    const off = (i - (cfg.spread - 1) / 2) * 1.2;
+    const dx = playerX + off - e.x, dz = -e.z;
+    const len = Math.hypot(dx, dz);
+    if (shots.length < 200) shots.push({ x: e.x, z: e.z + 0.5 * e.size, vx: (dx / len) * SHOT_SPEED, vz: (dz / len) * SHOT_SPEED });
+  }
 }
 
 // Death bursts: little cubes that pop out in the enemy's colour.
@@ -338,7 +405,7 @@ const barFill = makeBars(0xffffff, 11);
 
 const tmp = new THREE.Object3D();
 const tmpColor = new THREE.Color();
-const WHITE = new THREE.Color(0xffffff), HURT = new THREE.Color(0x8a1030);
+const WHITE = new THREE.Color(0xffffff);
 
 // ---------- Spawning ----------
 const rand = (a: number, b: number) => a + Math.random() * (b - a);
@@ -382,9 +449,14 @@ function spawnEnemy(kind: EnemyKind, cx?: number, z = SPAWN_Z + rand(-5, 0)): nu
   if (enemies.length >= MAX_ENEMIES) return 0;
   const t = ENEMY_TYPES[kind];
   // Bosses take ~(8 + 0.4 x wave) seconds of your full firepower; others scale gently with power.
+  // Every enemy must be killable before it reaches you: cap its HP at a set number of
+  // seconds of the fire you can actually land on something its width. Tougher types get longer.
+  const width = 1.1 * t.size + 0.2;
+  const killSeconds = kind === 'boss' ? 8 + wave * 0.4 : THREE.MathUtils.clamp(t.hp / 12, 0.4, 4);
+  const cap = dpsOnTarget(width) * killSeconds;
   const maxHp = kind === 'boss'
-    ? Math.round(Math.max(t.hp, playerDps() * (8 + wave * 0.4)) * perf)
-    : Math.round(t.hp * hpScale() * rand(0.9, 1.1));
+    ? Math.round(cap * perf)
+    : Math.round(Math.min(t.hp * hpScale(), cap) * rand(0.9, 1.1));
   const edge = ROAD_HALF - 0.4 * t.size;
   enemies.push({
     x: kind === 'boss' ? 0 : THREE.MathUtils.clamp(cx ?? rand(-edge, edge), -edge, edge),
@@ -392,7 +464,7 @@ function spawnEnemy(kind: EnemyKind, cx?: number, z = SPAWN_Z + rand(-5, 0)): nu
     hp: Math.max(1, maxHp), maxHp: Math.max(1, maxHp),
     speed: rand(6, 7.5) * (1 + (wave - 1) * 0.04) * t.speed,
     wobble: Math.random() * 10,
-    tx: 0, retarget: 0,
+    tx: 0, retarget: 0, fireCd: rand(1, 2.5),
     kind, size: t.size, color: new THREE.Color(t.color), dmg: t.dmg, points: t.points, flash: 0,
   });
   return Math.max(1, maxHp);
@@ -415,13 +487,12 @@ function startWave(n: number) {
 }
 
 function spawnCrate() {
-  const kind = pick<UpgradeKind>(['rate', 'gun', 'dmg', 'speed']);
+  // Hearts are rare (~1 in 7) and only offered when you're missing one.
+  const kind: UpgradeKind = lives < PLAYER_LIVES && Math.random() < 0.15
+    ? 'heal' : pick<UpgradeKind>(['rate', 'gun', 'dmg', 'speed']);
   // ~3s of focused fire from the barrels that actually fit across the crate (about 2 units
   // wide), not your whole gun. Tracking full DPS made crates unreachable once the gun got wide.
-  const offs = gunOffsets();
-  const gap = offs.length > 1 ? offs[1] - offs[0] : 1;
-  const barrelsOnCrate = Math.min(offs.length, Math.floor(2 / gap) + 1);
-  const maxHp = Math.round(20 + barrelsOnCrate * damage * fireRate * 3);
+  const maxHp = Math.round(20 + dpsOnTarget(2) * 3);
   const mesh = new THREE.Mesh(
     new THREE.BoxGeometry(1.6, 1.6, 1.6),
     new THREE.MeshStandardMaterial({ color: 0x8a6a4a }),
@@ -514,7 +585,7 @@ function updateHud() {
 }
 
 function reset() {
-  bullets = []; enemies = []; particles = [];
+  bullets = []; enemies = []; particles = []; shots = [];
   rows.forEach(removeRow); rows = [];
   crates.forEach(removeCrate); crates = [];
   playerX = targetX = 0;
@@ -570,6 +641,7 @@ function collect(kind: UpgradeKind) {
   if (kind === 'gun') { gunCount = Math.min(gunCount + 1, 4); rebuildGuns(); }
   if (kind === 'dmg') damage += 1;
   if (kind === 'speed') bulletSpeed = Math.min(bulletSpeed + 4, 50);
+  if (kind === 'heal') lives = Math.min(PLAYER_LIVES, lives + 1);
   navigator.vibrate?.(40);
 }
 
@@ -684,6 +756,11 @@ function update(dt: number) {
       const dx = e.tx - e.x;
       e.x += Math.sign(dx) * Math.min(Math.abs(dx), 2.2 * agility * dt);
     }
+    // Shoot only once on screen and not point-blank.
+    if (e.z > -50 && e.z < -10 && (e.fireCd -= dt) <= 0) {
+      enemyFire(e);
+      e.fireCd = (SHOOTERS[e.kind]?.cd ?? 99) * rand(0.8, 1.2);
+    }
     if (e.z > -0.3) {
       e.hp = 0;
       lives -= e.dmg;
@@ -693,6 +770,19 @@ function update(dt: number) {
     }
   }
   enemies = enemies.filter((e) => e.hp > 0);
+
+  shots = shots.filter((sh) => {
+    sh.x += sh.vx * dt;
+    sh.z += sh.vz * dt;
+    if (Math.abs(sh.x - playerX) < 0.45 && Math.abs(sh.z) < 0.5) {
+      lives -= 1;
+      perf = Math.max(PERF_MIN, perf - 0.12);
+      hurtFlash = 0.3;
+      navigator.vibrate?.(120);
+      return false;
+    }
+    return sh.z < 3 && Math.abs(sh.x) < ROAD_HALF + 1;
+  });
 
   // Killing far away = cruising, so perf creeps up; close calls ease it back down.
   if (killDepth < -40) perf += dt * 0.01;
@@ -774,6 +864,15 @@ function render(dt: number) {
     particleMesh.setMatrixAt(i, tmp.matrix);
     particleMesh.setColorAt(i, p.color);
   });
+  shots.forEach((sh, i) => {
+    tmp.position.set(sh.x, 0.9, sh.z);
+    tmp.rotation.set(0, 0, 0);
+    tmp.scale.setScalar(1 + Math.sin(time * 20 + i) * 0.15);
+    tmp.updateMatrix();
+    shotMesh.setMatrixAt(i, tmp.matrix);
+  });
+  shotMesh.count = shots.length;
+  shotMesh.instanceMatrix.needsUpdate = true;
   particleMesh.count = particles.length;
   particleMesh.instanceMatrix.needsUpdate = true;
   if (particleMesh.instanceColor) particleMesh.instanceColor.needsUpdate = true;
@@ -803,9 +902,9 @@ function render(dt: number) {
   if (barFill.instanceColor) barFill.instanceColor.needsUpdate = true;
 
   hurtFlash = Math.max(0, hurtFlash - dt);
-  (scene.background as THREE.Color).copy(SKY).lerp(HURT, Math.min(1, hurtFlash * 2.5));
+  skyUniforms.hurt.value = Math.min(1, hurtFlash * 2.5);
 
-  renderer.render(scene, camera);
+  composer.render();
 }
 
 rebuildGuns();
