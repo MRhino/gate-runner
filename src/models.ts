@@ -12,14 +12,14 @@ import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js
 //   arm    - one arm, pivot at the shoulder; swings opposite to the leg on its side
 // Models face +z (toward the player) with their feet at y = 0.
 
-type V3 = [number, number, number];
-type Part = { geo: THREE.BufferGeometry; color?: number; pos?: V3; rot?: V3; scale?: V3 };
+export type V3 = [number, number, number];
+export type Part = { geo: THREE.BufferGeometry; color?: number; pos?: V3; rot?: V3; scale?: V3 };
 
 const m4 = new THREE.Matrix4();
 const q = new THREE.Quaternion();
 const eul = new THREE.Euler();
 
-function merge(parts: Part[]): THREE.BufferGeometry {
+export function merge(parts: Part[]): THREE.BufferGeometry {
   const geos = parts.map(({ geo, color = 0xffffff, pos = [0, 0, 0], rot = [0, 0, 0], scale = [1, 1, 1] }) => {
     const g = geo.index ? geo.toNonIndexed() : geo.clone();
     g.deleteAttribute('uv');
@@ -44,7 +44,7 @@ const cone = (r: number, h: number, s = 8) => new THREE.ConeGeometry(r, h, s);
 const cyl = (rt: number, rb: number, h: number, s = 12) => new THREE.CylinderGeometry(rt, rb, h, s);
 
 // Egg / pear shaped body via a lathe: `bulge` > 0 makes it bottom-heavy (bellies), < 0 top-heavy (chests).
-function egg(r: number, h: number, bulge = 0.25, seg = 12): THREE.BufferGeometry {
+export function egg(r: number, h: number, bulge = 0.25, seg = 12): THREE.BufferGeometry {
   const pts: THREE.Vector2[] = [];
   const n = 9;
   for (let i = 0; i <= n; i++) {
@@ -274,36 +274,4 @@ export function buildEnemyModels(): Record<string, EnemyModel> {
   };
 
   return models;
-}
-
-// The player: a chunky little trooper with a helmet, visor and backpack.
-export function buildPlayer(mat: THREE.Material): { root: THREE.Group; legs: THREE.Object3D[] } {
-  const root = new THREE.Group();
-  const YELLOW = 0xffd23f, DARK = 0x2b2d42, VISOR = 0x4dd8ff;
-  const torsoY = HIP_Y + 0.37;
-  const hy = torsoY + 0.62;
-  const body = new THREE.Mesh(merge([
-    { geo: egg(0.34, 0.8, -0.05), color: YELLOW, pos: [0, torsoY, 0] },
-    { geo: box(0.62, 0.12, 0.55), color: DARK, pos: [0, HIP_Y + 0.08, 0] },
-    { geo: box(0.44, 0.55, 0.28), color: DARK, pos: [0, torsoY + 0.05, 0.32] }, // backpack (player faces -z)
-    { geo: cyl(0.03, 0.03, 0.35), color: DARK, pos: [0.14, torsoY + 0.45, 0.36] },
-    { geo: sphere(0.05, 8, 6), color: 0xff4040, pos: [0.14, torsoY + 0.64, 0.36] },
-    { geo: sphere(0.3, 9, 6), color: YELLOW, pos: [0, hy, 0] },
-    { geo: sphere(0.24, 10, 7), color: VISOR, pos: [0, hy + 0.02, -0.12], scale: [1.15, 0.6, 1] },
-    ...[-1, 1].map((s): Part => ({ geo: capsule(0.09, 0.3), color: YELLOW, pos: [s * 0.36, torsoY + 0.05, -0.15], rot: [Math.PI / 2, 0, 0] })),
-  ]), mat);
-  body.castShadow = true;
-  root.add(body);
-  const legGeo = makeLeg(0.11, 0x111111);
-  // makeLeg colours the leg white for tinting; repaint it dark for the player.
-  const cols = legGeo.attributes.color as THREE.BufferAttribute;
-  for (let i = 0; i < cols.count; i++) if (cols.getX(i) === 1) cols.setXYZ(i, 0.17, 0.18, 0.26);
-  const legs = [-1, 1].map((s) => {
-    const l = new THREE.Mesh(legGeo, mat);
-    l.position.set(s * 0.15, HIP_Y, 0);
-    l.castShadow = true;
-    root.add(l);
-    return l;
-  });
-  return { root, legs };
 }

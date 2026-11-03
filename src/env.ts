@@ -1,4 +1,5 @@
 import * as THREE from 'three';
+import { merge, egg, type Part } from './models';
 
 // Ambient world dressing: nothing here affects gameplay, it just makes the world feel alive.
 // Flaming braziers along the road, distant mountains, a ringed moon, a bat flock, rising sky
@@ -11,7 +12,7 @@ const glow = (color: number, k: number, opacity = 1) => new THREE.MeshBasicMater
   blending: THREE.AdditiveBlending, depthWrite: false, fog: false,
 });
 
-export function createAmbient(scene: THREE.Scene, roadHalf: number) {
+export function createAmbient(scene: THREE.Scene, roadHalf: number, camera: THREE.Camera) {
   const o = new THREE.Object3D();
   const updaters: ((dt: number, t: number) => void)[] = [];
 
@@ -119,49 +120,139 @@ export function createAmbient(scene: THREE.Scene, roadHalf: number) {
   scene.add(stars);
   updaters.push((_, t) => ((stars.material as THREE.PointsMaterial).opacity = 0.65 + Math.sin(t * 1.5) * 0.15));
 
-  // ---------- Bat flock circling over the side fields ----------
-  const BATS = 24;
-  const wing = new THREE.BufferGeometry();
-  wing.setAttribute('position', new THREE.BufferAttribute(new Float32Array([0, 0, 0.2, 0, 0, -0.2, 1, 0, 0]), 3));
-  wing.computeVertexNormals();
-  const batMat = new THREE.MeshBasicMaterial({ color: 0x120a1c, side: THREE.DoubleSide });
-  const batL = new THREE.InstancedMesh(wing, batMat, BATS);
-  const batR = new THREE.InstancedMesh(wing, batMat, BATS);
-  scene.add(batL, batR);
+  // ---------- Bats: furry bodies, big ears, glowing eyes, two-part scalloped membrane wings ----------
+  // Each wing is an inner section (shoulder to wrist) and an outer section (wrist to tip) so the
+  // wing can fold on the upstroke and spread on the downstroke, like a real bat.
+  const BATS = 22;
+  const FUR = 0x2b1b33, MEMBRANE = 0x3a2140, BONE_C = 0x1a0f20;
+  const wingPart = (pts: [number, number][], bones: [number, number][]) => {
+    const shape = new THREE.Shape();
+    shape.moveTo(pts[0][0], pts[0][1]);
+    for (let i = 1; i < pts.length; i += 2) shape.quadraticCurveTo(pts[i][0], pts[i][1], pts[i + 1][0], pts[i + 1][1]);
+    const membrane = new THREE.ShapeGeometry(shape, 12).rotateX(Math.PI / 2);
+    const parts: Part[] = [{ geo: membrane, color: MEMBRANE }];
+    // Finger bones fan out from the joint to the scallop points.
+    for (const [x, z] of bones) {
+      const len = Math.hypot(x, z);
+      // Bone lies flat in the wing plane, pointing from the joint toward (x, z).
+      parts.push({ geo: new THREE.CylinderGeometry(0.012, 0.02, len, 5).rotateX(Math.PI / 2), color: BONE_C, pos: [x / 2, 0.005, z / 2], rot: [0, Math.atan2(x, z), 0] });
+    }
+    return merge(parts);
+  };
+  // Shape coords: x = out along the wing, y = toward the front (becomes +z).
+  const innerGeo = wingPart(
+    [[0, 0.14], [0.3, 0.2], [0.58, 0.16], [0.56, 0.0], [0.48, -0.16], [0.36, -0.08], [0.24, -0.2], [0.12, -0.1], [0, -0.14], [0, 0, ], [0, 0.14]],
+    [[0.58, 0.16]],
+  );
+  const outerGeo = wingPart(
+    [[0, 0.16], [0.4, 0.14], [0.8, 0.0], [0.7, -0.1], [0.58, -0.26], [0.46, -0.12], [0.34, -0.34], [0.22, -0.14], [0.1, -0.3], [0.04, -0.1], [0, 0.0]],
+    [[0.8, 0.0], [0.58, -0.26], [0.34, -0.34], [0.1, -0.3]],
+  );
+  const batBody = merge([
+    { geo: egg(0.11, 0.34, 0.15, 14), color: FUR, rot: [Math.PI / 2, 0, 0] },
+    { geo: new THREE.SphereGeometry(0.1, 16, 12), color: FUR, pos: [0, 0.03, 0.2] },
+    { geo: new THREE.SphereGeometry(0.045, 10, 8), color: 0x4a2a50, pos: [0, 0.0, 0.29], scale: [1, 0.8, 1] }, // snout
+    ...[-1, 1].flatMap((sd): Part[] => [
+      { geo: new THREE.ConeGeometry(0.045, 0.16, 8), color: FUR, pos: [sd * 0.06, 0.14, 0.18], rot: [-0.2, 0, -sd * 0.35] },
+      { geo: new THREE.ConeGeometry(0.025, 0.11, 6), color: 0x8a4a6a, pos: [sd * 0.06, 0.14, 0.195], rot: [-0.2, 0, -sd * 0.35] },
+      { geo: new THREE.ConeGeometry(0.012, 0.035, 4), color: 0xffffff, pos: [sd * 0.02, -0.04, 0.3], rot: [Math.PI, 0, 0] }, // fangs
+      { geo: new THREE.CylinderGeometry(0.012, 0.008, 0.1, 5), color: BONE_C, pos: [sd * 0.04, -0.06, -0.16], rot: [0.6, 0, 0] }, // feet
+    ]),
+  ]);
+  const batEyesGeo = merge([-1, 1].map((sd): Part => ({ geo: new THREE.SphereGeometry(0.022, 8, 6), pos: [sd * 0.045, 0.06, 0.28] })));
+  const batMat = new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.9, side: THREE.DoubleSide });
+  const mkBat = (geo: THREE.BufferGeometry, mat: THREE.Material) => {
+    const m = new THREE.InstancedMesh(geo, mat, BATS);
+    m.frustumCulled = false;
+    scene.add(m);
+    return m;
+  };
+  const batBodies = mkBat(batBody, batMat);
+  const batEyes = mkBat(batEyesGeo, glow(0xff2020, 2.5));
+  const wingMeshes = [mkBat(innerGeo, batMat), mkBat(outerGeo, batMat), mkBat(innerGeo, batMat), mkBat(outerGeo, batMat)];
   const bats = Array.from({ length: BATS }, (_, i) => ({
-    cx: (i % 2 ? 1 : -1) * rand(14, 24), cz: rand(-60, -25), r: rand(4, 9), y: rand(9, 16),
-    sp: rand(0.4, 0.8) * (Math.random() < 0.5 ? 1 : -1), ph: rand(0, 6), flap: rand(10, 14),
+    cx: (i % 2 ? 1 : -1) * rand(13, 24), cz: rand(-60, -22), r: rand(4, 9), y: rand(8, 15),
+    sp: rand(0.35, 0.7) * (Math.random() < 0.5 ? 1 : -1), ph: rand(0, 6), flap: rand(7, 10), size: rand(1.6, 2.4),
   }));
-  const wingTmp = new THREE.Object3D();
+  const wi = new THREE.Matrix4(), wo = new THREE.Matrix4(), tmpM = new THREE.Matrix4(), mirror = new THREE.Matrix4().makeScale(-1, 1, 1);
   updaters.push((_, t) => {
     bats.forEach((b, i) => {
       const a = b.ph + t * b.sp;
+      // Fly tangent to the circle, banking into the turn.
       o.position.set(b.cx + Math.cos(a) * b.r, b.y + Math.sin(t * 1.3 + b.ph) * 1.2, b.cz + Math.sin(a) * b.r);
-      o.rotation.set(0, -a + (b.sp > 0 ? 0 : Math.PI), 0);
-      o.scale.setScalar(1.2);
+      o.rotation.set(0, Math.atan2(-Math.sin(a) * b.sp, Math.cos(a) * b.sp), -Math.sign(b.sp) * 0.35, 'YXZ');
+      o.scale.setScalar(b.size);
       o.updateMatrix();
-      const f = Math.sin(t * b.flap + b.ph) * 0.8;
-      for (const [mesh, side] of [[batL, -1], [batR, 1]] as const) {
-        wingTmp.rotation.set(0, side < 0 ? Math.PI : 0, side * f);
-        wingTmp.updateMatrix();
-        wingTmp.matrix.premultiply(o.matrix);
-        mesh.setMatrixAt(i, wingTmp.matrix);
+      batBodies.setMatrixAt(i, o.matrix);
+      batEyes.setMatrixAt(i, o.matrix);
+      const ph = t * b.flap + b.ph;
+      const f = Math.sin(ph); // +1 = wings up
+      const fold = Math.max(0, f) * 0.9; // outer wing folds in on the upstroke
+      for (let side = 0; side < 2; side++) {
+        wi.makeTranslation(0.06, 0.02, 0.02).multiply(tmpM.makeRotationZ(f * 0.9));
+        wo.copy(wi).multiply(tmpM.makeTranslation(0.56, 0, 0)).multiply(tmpM.makeRotationZ(-f * 0.5 + fold * 0.4)).multiply(tmpM.makeRotationY(fold * 0.8));
+        const base = side === 0 ? o.matrix.clone().multiply(mirror) : o.matrix;
+        wingMeshes[side * 2].setMatrixAt(i, tmpM.copy(base).multiply(wi));
+        wingMeshes[side * 2 + 1].setMatrixAt(i, tmpM.copy(base).multiply(wo));
       }
     });
-    batL.instanceMatrix.needsUpdate = batR.instanceMatrix.needsUpdate = true;
+    for (const m of [batBodies, batEyes, ...wingMeshes]) m.instanceMatrix.needsUpdate = true;
   });
 
-  // ---------- Sky lanterns rising from the fields ----------
-  const LANTERNS = 28;
-  const lanternMesh = new THREE.InstancedMesh(new THREE.CylinderGeometry(0.35, 0.25, 0.6, 8), glow(0xffa64a, 1.6, 0.9), LANTERNS);
-  const lanternHalo = new THREE.InstancedMesh(new THREE.SphereGeometry(0.8, 10, 8), glow(0xff7a20, 0.6, 0.3), LANTERNS);
-  lanternMesh.frustumCulled = lanternHalo.frustumCulled = false;
-  scene.add(lanternMesh, lanternHalo);
+  // ---------- Paper sky lanterns ----------
+  // Tapered paper shell (lathe) lit from inside: brightest at the open bottom near the flame,
+  // darker toward the top. Bamboo ribs and hoop, a wire cross with a burning fuel cell, and a soft halo.
+  const LANTERNS = 26;
+  const profile: THREE.Vector2[] = [];
+  for (let i = 0; i <= 16; i++) {
+    const tt = i / 16;
+    const r = tt < 0.82 ? 0.28 + 0.16 * Math.sin((tt / 0.82) * Math.PI * 0.5) : 0.44 * Math.cos(((tt - 0.82) / 0.18) * Math.PI * 0.5);
+    profile.push(new THREE.Vector2(Math.max(0.001, r), tt * 1.05));
+  }
+  const paper = new THREE.LatheGeometry(profile, 28);
+  const pc = new Float32Array(paper.attributes.position.count * 3);
+  const lo = new THREE.Color(1.9, 1.15, 0.5), hi = new THREE.Color(0.85, 0.32, 0.12), cc = new THREE.Color();
+  for (let i = 0; i < paper.attributes.position.count; i++) {
+    cc.copy(lo).lerp(hi, Math.min(1, paper.attributes.position.getY(i) / 1.05));
+    pc.set([cc.r, cc.g, cc.b], i * 3);
+  }
+  paper.setAttribute('color', new THREE.BufferAttribute(pc, 3));
+  const paperMesh = new THREE.InstancedMesh(paper, new THREE.MeshBasicMaterial({ vertexColors: true, side: THREE.DoubleSide, transparent: true, opacity: 0.93, fog: false }), LANTERNS);
+  const ribParts: Part[] = [];
+  for (let k = 0; k < 8; k++) {
+    const ang = (k / 8) * Math.PI * 2;
+    for (let i = 0; i < 16; i += 2) {
+      const a = profile[i], b = profile[i + 2];
+      const mid = new THREE.Vector3(((a.x + b.x) / 2) * Math.cos(ang), (a.y + b.y) / 2, ((a.x + b.x) / 2) * Math.sin(ang));
+      const len = Math.hypot(b.x - a.x, b.y - a.y);
+      const tilt = Math.atan2(b.x - a.x, b.y - a.y);
+      ribParts.push({ geo: new THREE.BoxGeometry(0.018, len, 0.018), color: 0x6b3a1a, pos: [mid.x * 1.01, mid.y, mid.z * 1.01], rot: [0, -ang, 0] });
+      const rp = ribParts[ribParts.length - 1];
+      rp.rot = [Math.sin(ang) * tilt, 0, -Math.cos(ang) * tilt]; // lean the rib outward with the paper
+    }
+  }
+  ribParts.push({ geo: new THREE.TorusGeometry(0.28, 0.022, 8, 28), color: 0xa8743a, rot: [Math.PI / 2, 0, 0] });
+  ribParts.push({ geo: new THREE.BoxGeometry(0.56, 0.01, 0.01), color: 0x555555 });
+  ribParts.push({ geo: new THREE.BoxGeometry(0.01, 0.01, 0.56), color: 0x555555 });
+  ribParts.push({ geo: new THREE.CylinderGeometry(0.05, 0.05, 0.05, 10), color: 0x3a2a1a, pos: [0, -0.01, 0] });
+  const ribMesh = new THREE.InstancedMesh(merge(ribParts), new THREE.MeshBasicMaterial({ vertexColors: true, fog: false }), LANTERNS);
+  const flameMesh = new THREE.InstancedMesh(new THREE.SphereGeometry(0.06, 12, 8).scale(1, 1.8, 1).translate(0, 0.1, 0), glow(0xfff2b0, 3), LANTERNS);
+  // Soft radial-gradient halo billboard.
+  const haloTex = (() => {
+    const c = document.createElement('canvas'); c.width = c.height = 64;
+    const g = c.getContext('2d')!;
+    const gr = g.createRadialGradient(32, 32, 0, 32, 32, 32);
+    gr.addColorStop(0, 'rgba(255,190,110,0.9)'); gr.addColorStop(0.4, 'rgba(255,120,40,0.35)'); gr.addColorStop(1, 'rgba(255,80,0,0)');
+    g.fillStyle = gr; g.fillRect(0, 0, 64, 64);
+    const tx = new THREE.CanvasTexture(c); tx.colorSpace = THREE.SRGBColorSpace; return tx;
+  })();
+  const haloMesh = new THREE.InstancedMesh(new THREE.PlaneGeometry(2.6, 2.6), new THREE.MeshBasicMaterial({ map: haloTex, transparent: true, blending: THREE.AdditiveBlending, depthWrite: false, fog: false }), LANTERNS);
+  for (const m of [paperMesh, ribMesh, flameMesh, haloMesh]) { m.frustumCulled = false; scene.add(m); }
   const spawnLantern = (l: { x: number; y: number; z: number; v: number; ph: number }, anyHeight: boolean) => {
     l.x = (Math.random() < 0.5 ? -1 : 1) * rand(roadHalf + 4, 30);
     l.z = rand(-70, 0);
     l.y = anyHeight ? rand(0, 30) : 0;
-    l.v = rand(0.6, 1.2);
+    l.v = rand(0.6, 1.1);
     l.ph = rand(0, 6);
   };
   const lanterns = Array.from({ length: LANTERNS }, () => { const l = { x: 0, y: 0, z: 0, v: 0, ph: 0 }; spawnLantern(l, true); return l; });
@@ -169,14 +260,23 @@ export function createAmbient(scene: THREE.Scene, roadHalf: number) {
     lanterns.forEach((l, i) => {
       l.y += l.v * dt;
       if (l.y > 32) spawnLantern(l, false);
-      o.position.set(l.x + Math.sin(t * 0.5 + l.ph) * 1.5, l.y + 0.5, l.z);
-      o.rotation.set(0, t * 0.3 + l.ph, Math.sin(t + l.ph) * 0.1);
-      o.scale.setScalar(Math.min(1, l.y / 2) * (1 + Math.sin(t * 6 + l.ph) * 0.05));
+      const grow = Math.min(1, l.y / 2) * 1.3;
+      o.position.set(l.x + Math.sin(t * 0.5 + l.ph) * 1.5, l.y, l.z);
+      o.rotation.set(Math.sin(t * 0.8 + l.ph) * 0.06, t * 0.25 + l.ph, Math.cos(t * 0.7 + l.ph) * 0.06);
+      o.scale.setScalar(grow);
       o.updateMatrix();
-      lanternMesh.setMatrixAt(i, o.matrix);
-      lanternHalo.setMatrixAt(i, o.matrix);
+      paperMesh.setMatrixAt(i, o.matrix);
+      ribMesh.setMatrixAt(i, o.matrix);
+      o.scale.setScalar(grow * (1 + Math.sin(t * 18 + l.ph * 5) * 0.15));
+      o.updateMatrix();
+      flameMesh.setMatrixAt(i, o.matrix);
+      o.position.y += 0.45 * grow;
+      o.quaternion.copy(camera.quaternion);
+      o.scale.setScalar(grow * (1 + Math.sin(t * 6 + l.ph) * 0.06));
+      o.updateMatrix();
+      haloMesh.setMatrixAt(i, o.matrix);
     });
-    lanternMesh.instanceMatrix.needsUpdate = lanternHalo.instanceMatrix.needsUpdate = true;
+    for (const m of [paperMesh, ribMesh, flameMesh, haloMesh]) m.instanceMatrix.needsUpdate = true;
   });
 
   // ---------- Shooting stars every few seconds ----------

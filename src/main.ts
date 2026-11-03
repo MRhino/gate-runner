@@ -1,8 +1,9 @@
 import * as THREE from 'three';
 import { registerSW } from 'virtual:pwa-register';
 import './style.css';
-import { buildEnemyModels, buildPlayer, HIP_Y, type EnemyModel } from './models';
+import { buildEnemyModels, HIP_Y, type EnemyModel } from './models';
 import { createAmbient } from './env';
+import { createHero, createBoltMeshes } from './hero';
 import { EffectComposer } from 'three/examples/jsm/postprocessing/EffectComposer.js';
 import { RenderPass } from 'three/examples/jsm/postprocessing/RenderPass.js';
 import { UnrealBloomPass } from 'three/examples/jsm/postprocessing/UnrealBloomPass.js';
@@ -147,7 +148,7 @@ scene.add(road);
   rocks.castShadow = rocks.receiveShadow = true;
   scene.add(rocks);
 }
-const updateAmbient = createAmbient(scene, ROAD_HALF);
+const updateAmbient = createAmbient(scene, ROAD_HALF, camera);
 
 const stripeMat = new THREE.MeshBasicMaterial({ color: 0x6d5fc0 });
 for (let i = 0; i < 20; i++) {
@@ -175,32 +176,10 @@ const toonRamp = (() => {
   return t;
 })();
 const toon = () => new THREE.MeshToonMaterial({ vertexColors: true, gradientMap: toonRamp });
-const { root: body, legs: playerLegs } = buildPlayer(toon());
-playerLegs.forEach((l) => (l.rotation.order = 'YXZ', l.rotation.y = Math.PI)); // feet point the way the player faces
-player.add(body);
-const gunMat = new THREE.MeshStandardMaterial({ color: 0x3a3d55, metalness: 0.7, roughness: 0.35 });
-const guns: THREE.Mesh[] = [];
+const hero = createHero(toon());
+player.add(hero.root);
 scene.add(player);
-
-function rebuildGuns() {
-  guns.forEach((g) => player.remove(g));
-  guns.length = 0;
-  const offsets = gunOffsets();
-  // A crossbar holds the barrels together once the gun is wider than the body.
-  const width = offsets[offsets.length - 1] - offsets[0];
-  if (width > 0) {
-    const bar = new THREE.Mesh(new THREE.BoxGeometry(width + 0.2, 0.12, 0.25), gunMat);
-    bar.position.set(0, 0.9, -0.2);
-    player.add(bar);
-    guns.push(bar);
-  }
-  for (const x of offsets) {
-    const g = new THREE.Mesh(new THREE.BoxGeometry(0.1, 0.1, 0.7), gunMat);
-    g.position.set(x, 0.9, -0.45);
-    player.add(g);
-    guns.push(g);
-  }
-}
+const rebuildGuns = () => hero.setBarrels(gunOffsets());
 
 // ---------- Text textures for gates and crates ----------
 function makeLabel(w = 256, h = 128) {
@@ -310,13 +289,7 @@ const gunOffsets = () => {
 };
 
 // ---------- Instanced bullets & enemies ----------
-const bulletMesh = new THREE.InstancedMesh(
-  new THREE.CapsuleGeometry(0.08, 0.35, 3, 6).rotateX(Math.PI / 2),
-  new THREE.MeshBasicMaterial({ color: new THREE.Color(0xfff3b0).multiplyScalar(0.95) }), // under the bloom threshold on purpose
-  MAX_BULLETS,
-);
-bulletMesh.frustumCulled = false;
-scene.add(bulletMesh);
+const drawBolts = createBoltMeshes(scene, MAX_BULLETS);
 
 // One set of instanced meshes per enemy type: tinted body, untinted accents, and two legs.
 const enemyMat = toon();
@@ -686,10 +659,11 @@ function update(dt: number) {
 
   playerX += (targetX - playerX) * Math.min(1, dt * 14);
   player.position.x = playerX;
-  body.rotation.z = (playerX - targetX) * 0.3;
-  // Shuffle the legs while strafing.
-  const strafe = Math.min(1, Math.abs(targetX - playerX) * 3);
-  playerLegs.forEach((l, i) => (l.rotation.x = Math.sin(time * 18 + i * Math.PI) * 0.6 * strafe));
+  hero.update(dt, time, {
+    tilt: (playerX - targetX) * 0.3,
+    strafe: Math.min(1, Math.abs(targetX - playerX) * 3),
+    camera,
+  });
 
   // Spawners: difficulty ramps with time.
   if (time >= wave * WAVE_SECONDS) startWave(wave + 1);
@@ -716,6 +690,7 @@ function update(dt: number) {
   fireTimer -= dt;
   if (fireTimer <= 0) {
     fireTimer = 1 / fireRate;
+    hero.fire();
     for (const ox of gunOffsets()) {
       if (bullets.length < MAX_BULLETS) bullets.push({ x: playerX + ox, z: -1, vx: 0, alive: true });
     }
@@ -842,15 +817,7 @@ function update(dt: number) {
 }
 
 function render(dt: number) {
-  for (let i = 0; i < bullets.length; i++) {
-    tmp.position.set(bullets[i].x, 0.9, bullets[i].z);
-    tmp.rotation.set(0, 0, 0);
-    tmp.scale.setScalar(1);
-    tmp.updateMatrix();
-    bulletMesh.setMatrixAt(i, tmp.matrix);
-  }
-  bulletMesh.count = bullets.length;
-  bulletMesh.instanceMatrix.needsUpdate = true;
+  drawBolts(bullets);
 
   const counts: Record<string, number> = {};
   for (const k in enemyMeshes) counts[k] = 0;
