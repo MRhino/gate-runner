@@ -3,7 +3,16 @@ import { registerSW } from 'virtual:pwa-register';
 import './style.css';
 import { buildEnemyModels, buildPlayer, HIP_Y } from './models';
 
-registerSW({ immediate: true });
+// A new deploy installs in the background and would normally reload the page straight
+// away — mid-run if you'd just tapped play. Defer that reload until you're not playing.
+let reloadPending = false;
+registerSW({
+  immediate: true,
+  onNeedReload() {
+    if (state === 'play' || state === 'paused') reloadPending = true;
+    else location.reload();
+  },
+});
 
 // ---------- Tunables ----------
 const ROAD_HALF = 4; // road spans x in [-4, 4]
@@ -236,7 +245,8 @@ const playerDps = () => shotsPerVolley() * damage * fireRate;
 // Individual enemies get only mildly tankier (sqrt); extra power mostly means *more* enemies.
 const hpScale = () => Math.sqrt(playerDps() / BASE_DPS);
 // Not every bullet lands (the gun is narrower than the road), so pressure stays well under 1.
-const wavePressure = () => Math.min(0.85, 0.5 + 0.025 * (wave - 1));
+// Rises fastest in early waves, then flattens out toward 0.8 (~0.69 by wave 6, ~0.77 by wave 11).
+const wavePressure = () => 0.5 + 0.3 * (1 - Math.exp(-(wave - 1) / 5));
 // Performance nudge: killing far up the road pushes it up, close calls / lost hearts pull it down.
 let perf = 1, killDepth = -30;
 const PERF_MIN = 0.7, PERF_MAX = 1.3;
@@ -538,6 +548,7 @@ document.addEventListener('visibilitychange', () => { if (document.hidden) setPa
 
 function gameOver() {
   state = 'over';
+  if (reloadPending) { if (score > best()) localStorage.setItem('gate-runner-best', String(score)); location.reload(); return; }
   if (score > best()) localStorage.setItem('gate-runner-best', String(score));
   overlay.querySelector('h1')!.textContent = 'OVERRUN';
   overlay.querySelector('p')!.textContent = `Score ${score} · reached wave ${wave}`;
@@ -658,7 +669,7 @@ function update(dt: number) {
     if (e.z > -0.3) {
       e.hp = 0;
       lives -= e.dmg;
-      perf = Math.max(PERF_MIN, perf - 0.1);
+      perf = Math.max(PERF_MIN, perf - 0.12 * e.dmg); // bigger hits ease off more
       hurtFlash = 0.3;
       navigator.vibrate?.(120);
     }
