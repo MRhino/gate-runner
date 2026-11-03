@@ -3,7 +3,10 @@ import { registerSW } from 'virtual:pwa-register';
 import './style.css';
 import { buildEnemyModels, HIP_Y, type EnemyModel } from './models';
 import { createAmbient } from './env';
-import { createHero, createBoltMeshes } from './hero';
+import { createHero, createSquad, createProjectiles } from './hero';
+import { createFx } from './fx';
+import { createGateRow, type GateRowVisual } from './gates';
+import { WEAPONS, WEAPON_KINDS, type WeaponKind } from './weapons';
 import { EffectComposer } from 'three/examples/jsm/postprocessing/EffectComposer.js';
 import { RenderPass } from 'three/examples/jsm/postprocessing/RenderPass.js';
 import { UnrealBloomPass } from 'three/examples/jsm/postprocessing/UnrealBloomPass.js';
@@ -179,7 +182,7 @@ const toon = () => new THREE.MeshToonMaterial({ vertexColors: true, gradientMap:
 const hero = createHero(toon());
 player.add(hero.root);
 scene.add(player);
-const rebuildGuns = () => hero.setBarrels(gunOffsets());
+const fx = createFx(scene, camera);
 
 // ---------- Text textures for gates and crates ----------
 function makeLabel(w = 256, h = 128) {
@@ -195,7 +198,7 @@ function makeLabel(w = 256, h = 128) {
     ctx.roundRect(4, 4, w - 8, h - 8, 18);
     ctx.fill();
     ctx.fillStyle = fg;
-    ctx.font = `900 ${h * 0.5}px system-ui, sans-serif`;
+    ctx.font = `900 ${Math.min(h * 0.5, (w * 1.5) / text.length)}px system-ui, sans-serif`; // shrink long labels (weapon names)
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
     ctx.fillText(text, w / 2, h / 2 + 4);
@@ -205,14 +208,16 @@ function makeLabel(w = 256, h = 128) {
 }
 
 // ---------- Game state ----------
-type GateOp = { n: number }; // +n or -n bullets per volley
-type GateRow = { z: number; passed: boolean; mid: number; ops: [GateOp, GateOp]; meshes: THREE.Mesh[] };
-type Bullet = { x: number; z: number; vx: number; alive: boolean; crate?: Crate };
+type GateOp = { n: number }; // +n or -n squad members
+type GateRow = { z: number; passed: boolean; mid: number; ops: [GateOp, GateOp]; vis: GateRowVisual };
+type Bullet = { x: number; z: number; vx: number; alive: boolean; w: WeaponKind; crate?: Crate; pierced?: Set<Enemy> };
+type Mate = { x: number; z: number; recoil: number; spawn: number };
 type EnemyKind = 'grunt' | 'runner' | 'blue' | 'purple' | 'orange' | 'red' | 'boss';
 type Enemy = {
   x: number; z: number; hp: number; maxHp: number; speed: number; wobble: number; fireCd: number;
   tx: number; retarget: number; vx: number; // weaving: lateral target, time until a new one, sideways velocity
   kind: EnemyKind; size: number; color: THREE.Color; dmg: number; points: number; flash: number;
+  spawn: number; // 0 -> 1 as it materialises
 };
 
 // Tougher tiers are rarer: low-HP grunts make up the bulk of every pack, heavies get mixed in.
@@ -227,18 +232,19 @@ const ENEMY_TYPES: Record<EnemyKind, EnemyType> = {
   red: { hp: 150, speed: 0.65, size: 1.9, color: 0xe53935, dmg: 2, points: 600, wave: 7, weight: 2 },
   boss: { hp: 350, speed: 0.4, size: 3, color: 0x3a0a0a, dmg: 3, points: 3000, wave: 5, weight: 0 },
 };
-type UpgradeKind = 'rate' | 'gun' | 'dmg' | 'speed' | 'heal';
+type UpgradeKind = 'rate' | 'gun' | 'dmg' | 'speed' | 'heal' | 'weapon';
 type Crate = {
-  x: number; z: number; hp: number; maxHp: number; open: boolean; kind: UpgradeKind;
+  x: number; z: number; hp: number; maxHp: number; open: boolean; kind: UpgradeKind; weapon?: WeaponKind;
   mesh: THREE.Mesh; sprite: THREE.Sprite; draw: (t: string, bg: string, fg?: string) => void;
 };
 
 const UPGRADES: Record<UpgradeKind, { label: string; color: string }> = {
   rate: { label: 'RATE+', color: '#29c46b' },
-  gun: { label: 'GUN+', color: '#2f9bff' },
+  gun: { label: 'ALLY+', color: '#2f9bff' },
   dmg: { label: 'DMG+', color: '#ff8a29' },
   speed: { label: 'SPD+', color: '#c74bff' },
   heal: { label: '+♥', color: '#ff4d8d' },
+  weapon: { label: '', color: '' }, // label/colour come from the weapon itself
 };
 
 let state: 'menu' | 'play' | 'paused' | 'over' = 'menu';
@@ -247,6 +253,8 @@ let enemies: Enemy[] = [];
 let rows: GateRow[] = [];
 let crates: Crate[] = [];
 let playerX = 0, targetX = 0;
+let weapon: WeaponKind = 'blaster';
+let mates: Mate[] = []; // squad members other than you
 let lives = PLAYER_LIVES, score = 0, time = 0, wave = 0;
 
 // ---------- Difficulty director ----------
@@ -254,14 +262,15 @@ let lives = PLAYER_LIVES, score = 0, time = 0, wave = 0;
 // second equal to a fraction ("pressure") of your firepower. Get stronger and more
 // comes at you, but never faster than you can grow. Pressure rises gently per wave
 // and nudges up/down with how comfortably you're winning.
-const BASE_DPS = 5; // starting loadout: 1 shot x 1 dmg x 5/s
-const playerDps = () => shotsPerVolley() * damage * fireRate;
-// DPS you can put on a single target `width` units wide: only the barrels that fit across it count.
-// A wide gun is great against crowds but doesn't make one big enemy melt any faster.
+const BASE_DPS = 5; // starting loadout: 1 trooper x 1 dmg x 5/s blaster
+// Per-trooper damage per second with the current weapon (ignoring splash/pierce bonuses).
+const trooperDps = () => damage * fireRate * WEAPONS[weapon].rate * WEAPONS[weapon].dmg;
+const playerDps = () => shotsPerVolley() * trooperDps() * WEAPONS[weapon].crowdFactor;
+// DPS you can put on a single target `width` units wide: only troopers lined up behind it count.
+// A big squad is great against crowds but doesn't make one big enemy melt any faster.
 function dpsOnTarget(width: number) {
-  const offs = gunOffsets();
-  const gap = offs.length > 1 ? offs[1] - offs[0] : 1;
-  return Math.min(offs.length, Math.floor(width / gap) + 1) * damage * fireRate;
+  const inLine = squadSlots(shotsPerVolley()).filter((s) => Math.abs(s.x) <= width / 2 + 0.05).length;
+  return inLine * trooperDps();
 }
 // Individual enemies get only mildly tankier (sqrt); extra power mostly means *more* enemies.
 const hpScale = () => Math.sqrt(playerDps() / BASE_DPS);
@@ -277,19 +286,43 @@ let fireRate = 5, gunCount = 1, gateBonus = 0, damage = 1, bulletSpeed = 30;
 let fireTimer = 0, enemyTimer = 0, rowTimer = 2, crateTimer = 6;
 let hurtFlash = 0;
 
-// Bullets per volley = gun barrels + whatever the gates have added.
+// Squad size = you + ALLY+ pickups + whatever the gates have added. Everyone fires.
 const MAX_SHOTS = 30;
 const shotsPerVolley = () => THREE.MathUtils.clamp(gunCount + gateBonus, 1, MAX_SHOTS);
-// One barrel per bullet, side by side. The gun widens as you add shots; bullets fly straight.
-const GUN_MAX_WIDTH = 3;
-const gunOffsets = () => {
-  const n = shotsPerVolley();
-  const gap = n === 1 ? 0 : Math.min(0.25, GUN_MAX_WIDTH / (n - 1));
-  return Array.from({ length: n }, (_, i) => (i - (n - 1) / 2) * gap);
-};
+// Formation: you at the front-centre, allies fanning out beside you, then rows behind.
+// Up to 7 across (about 3 units wide); later rows are staggered so everyone has a firing lane.
+function squadSlots(n: number) {
+  const slots = [{ x: 0, z: 0 }];
+  const order = [1, -1, 2, -2, 3, -3];
+  for (let row = 0; slots.length < n; row++) {
+    const stagger = row % 2 ? 0.25 : 0;
+    const cols = row === 0 ? order : [0, ...order];
+    for (const c of cols) {
+      if (slots.length >= n) break;
+      slots.push({ x: c * 0.5 + (c === 0 ? stagger : Math.sign(c) * stagger), z: row * 0.65 + (row === 0 ? 0.15 : 0.65) });
+    }
+  }
+  return slots;
+}
+// Add or remove allies to match the squad size, with a beam-in / burst-out effect.
+function syncSquad() {
+  const want = shotsPerVolley() - 1;
+  const slots = squadSlots(want + 1);
+  while (mates.length < want) {
+    const s = slots[mates.length + 1];
+    const m = { x: playerX + s.x, z: s.z, recoil: 0, spawn: 0 };
+    mates.push(m);
+    fx.portal(m.x, m.z, 0x4de8ff, 0.6);
+  }
+  while (mates.length > want) {
+    const m = mates.pop()!;
+    fx.sparks(m.x, 0.9, m.z, 0xff4060, 14, 4);
+  }
+}
 
 // ---------- Instanced bullets & enemies ----------
-const drawBolts = createBoltMeshes(scene, MAX_BULLETS);
+const drawProjectiles = createProjectiles(scene, MAX_BULLETS);
+const drawSquad = createSquad(scene, toon(), MAX_SHOTS);
 
 // One set of instanced meshes per enemy type: tinted body, untinted accents, and two legs.
 const enemyMat = toon();
@@ -422,20 +455,10 @@ function spawnRow() {
   ];
   // The split between halves drifts so you have to aim, not just pick a side.
   const mid = rand(-1.5, 1.5);
-  const meshes: THREE.Mesh[] = [];
   const spans: [number, number][] = [[-ROAD_HALF, mid], [mid, ROAD_HALF]];
-  spans.forEach(([a, b], i) => {
-    const { tex, draw } = makeLabel();
-    draw(opText(ops[i]), isGood(ops[i]) ? '#1e88e5cc' : '#e53935cc');
-    const m = new THREE.Mesh(
-      new THREE.PlaneGeometry(b - a - 0.1, 2.2),
-      new THREE.MeshBasicMaterial({ map: tex, transparent: true, side: THREE.DoubleSide, depthWrite: false }),
-    );
-    m.position.set((a + b) / 2, 1.1, SPAWN_Z);
-    scene.add(m);
-    meshes.push(m);
-  });
-  rows.push({ z: SPAWN_Z, passed: false, mid, ops, meshes });
+  const vis = createGateRow(scene, spans, ops.map(opText), ops.map(isGood));
+  vis.setZ(SPAWN_Z);
+  rows.push({ z: SPAWN_Z, passed: false, mid, ops, vis });
 }
 
 const WAVE_SECONDS = 20;
@@ -460,8 +483,10 @@ function spawnEnemy(kind: EnemyKind, cx?: number, z = SPAWN_Z + rand(-5, 0)): nu
     speed: rand(6, 7.5) * (1 + (wave - 1) * 0.04) * t.speed,
     wobble: Math.random() * 10,
     tx: 0, retarget: 0, vx: 0, fireCd: rand(1, 2.5),
-    kind, size: t.size, color: new THREE.Color(t.color), dmg: t.dmg, points: t.points, flash: 0,
+    kind, size: t.size, color: new THREE.Color(t.color), dmg: t.dmg, points: t.points, flash: 0, spawn: 0,
   });
+  const e = enemies[enemies.length - 1];
+  fx.portal(e.x, e.z, t.color, 0.6 * t.size);
   return Math.max(1, maxHp);
 }
 
@@ -483,8 +508,10 @@ function startWave(n: number) {
 
 function spawnCrate() {
   // Hearts are rare (~1 in 7) and only offered when you're missing one.
+  // About 1 in 3 crates offers a different weapon; the rest are stat upgrades.
   const kind: UpgradeKind = lives < PLAYER_LIVES && Math.random() < 0.15
-    ? 'heal' : pick<UpgradeKind>(['rate', 'gun', 'dmg', 'speed']);
+    ? 'heal' : Math.random() < 0.33 ? 'weapon' : pick<UpgradeKind>(['rate', 'gun', 'dmg', 'speed']);
+  const offered = kind === 'weapon' ? pick(WEAPON_KINDS.filter((k) => k !== weapon)) : undefined;
   // ~3s of focused fire from the barrels that actually fit across the crate (about 2 units
   // wide), not your whole gun. Tracking full DPS made crates unreachable once the gun got wide.
   const maxHp = Math.round(20 + dpsOnTarget(2) * 3);
@@ -500,7 +527,7 @@ function spawnCrate() {
   sprite.scale.set(2, 1, 1);
   sprite.position.set(x, 2.4, SPAWN_Z);
   scene.add(mesh, sprite);
-  const c: Crate = { x, z: SPAWN_Z, hp: maxHp, maxHp, open: false, kind, mesh, sprite, draw };
+  const c: Crate = { x, z: SPAWN_Z, hp: maxHp, maxHp, open: false, kind, weapon: offered, mesh, sprite, draw };
   draw(String(maxHp), '#000a');
   crates.push(c);
 }
@@ -513,25 +540,35 @@ function removeCrate(c: Crate) {
   c.sprite.material.dispose();
 }
 function removeRow(r: GateRow) {
-  for (const m of r.meshes) {
-    scene.remove(m);
-    m.geometry.dispose();
-    const mat = m.material as THREE.MeshBasicMaterial;
-    mat.map?.dispose();
-    mat.dispose();
-  }
+  r.vis.dispose();
 }
 
 // ---------- Gate logic ----------
-// Gates act on the player: walking through one changes bullets per volley.
+// Gates act on the player: walking through one adds or removes squad members.
 function passGate(r: GateRow) {
   r.passed = true;
   const i = playerX < r.mid ? 0 : 1;
-  gateBonus = THREE.MathUtils.clamp(gateBonus + r.ops[i].n, 1 - gunCount, MAX_SHOTS - gunCount);
-  const m = r.meshes[i].material as THREE.MeshBasicMaterial;
-  m.opacity = 0.3;
-  rebuildGuns();
-  navigator.vibrate?.(r.ops[i].n > 0 ? 30 : 80);
+  const n = r.ops[i].n;
+  const [a, b] = i === 0 ? [-ROAD_HALF, r.mid] : [r.mid, ROAD_HALF];
+  r.vis.pass(i, THREE.MathUtils.clamp((playerX - a) / (b - a), 0, 1));
+  gateBonus = THREE.MathUtils.clamp(gateBonus + n, 1 - gunCount, MAX_SHOTS - gunCount);
+  syncSquad();
+  fx.text(playerX, 2.6, 0.5, opText(r.ops[i]), n > 0 ? '#7fd8ff' : '#ff6b81', 1.3);
+  fx.sparks(playerX, 1.2, 0, n > 0 ? 0x4de8ff : 0xff3050, 24, 6);
+  if (n < 0) fx.shake(0.18);
+  flashScreen(n > 0 ? 'rgba(80,200,255,0.35)' : 'rgba(255,40,70,0.4)');
+  navigator.vibrate?.(n > 0 ? 30 : 80);
+}
+
+// Brief full-screen colour wash (gate results, pickups).
+const screenFlash = document.createElement('div');
+screenFlash.style.cssText = 'position:fixed;inset:0;pointer-events:none;opacity:0;transition:opacity .35s ease-out;';
+document.body.appendChild(screenFlash);
+function flashScreen(color: string) {
+  screenFlash.style.transition = 'none';
+  screenFlash.style.background = `radial-gradient(ellipse at center, transparent 35%, ${color})`;
+  screenFlash.style.opacity = '1';
+  requestAnimationFrame(() => { screenFlash.style.transition = 'opacity .45s ease-out'; screenFlash.style.opacity = '0'; });
 }
 
 // ---------- Input: relative drag ----------
@@ -576,11 +613,12 @@ function updateHud() {
   $('score').textContent = String(score);
   $('lives').textContent = '♥'.repeat(Math.max(lives, 0)) + '♡'.repeat(PLAYER_LIVES - Math.max(lives, 0));
   $('stats').innerHTML =
-    `wave ${wave} · pressure ${pressure().toFixed(2)}<br>shots ${shotsPerVolley()} · dmg ${damage}<br>rate ${fireRate.toFixed(1)}/s · spd ${bulletSpeed.toFixed(0)}<br>bullets ${bullets.length}`;
+    `wave ${wave} · pressure ${pressure().toFixed(2)}<br>${WEAPONS[weapon].name} · squad ${shotsPerVolley()} · dmg ${damage}<br>rate ${fireRate.toFixed(1)}/s · spd ${bulletSpeed.toFixed(0)}<br>bullets ${bullets.length}`;
 }
 
 function reset() {
-  bullets = []; enemies = []; particles = []; shots = [];
+  bullets = []; enemies = []; particles = []; shots = []; mates = [];
+  fx.clear();
   rows.forEach(removeRow); rows = [];
   crates.forEach(removeCrate); crates = [];
   playerX = targetX = 0;
@@ -588,7 +626,7 @@ function reset() {
   perf = 1; killDepth = -30; hpBudget = 0;
   fireRate = 5; gunCount = 1; gateBonus = 0; damage = 1; bulletSpeed = 30;
   fireTimer = 0; enemyTimer = 2; rowTimer = 0.5; crateTimer = 6;
-  rebuildGuns();
+  setWeapon('blaster');
   updateHud();
 }
 
@@ -644,9 +682,34 @@ $('refresh').addEventListener('click', async () => {
   setTimeout(() => location.reload(), 1500);
 });
 
-function collect(kind: UpgradeKind) {
+const crateLook = (c: Crate) => c.kind === 'weapon'
+  ? { label: WEAPONS[c.weapon!].name, color: '#' + new THREE.Color(WEAPONS[c.weapon!].color).getHexString() }
+  : UPGRADES[c.kind];
+
+function setWeapon(k: WeaponKind) {
+  weapon = k;
+  hero.setWeapon(k);
+}
+
+function damageEnemy(e: Enemy, dmg: number) {
+  if (e.hp <= 0) return;
+  e.hp -= dmg;
+  e.flash = 0.08;
+  if (e.hp <= 0) {
+    score += e.points;
+    burst(e);
+    killDepth += (e.z - killDepth) * 0.05;
+  }
+}
+
+function collect(c: Crate) {
+  const kind = c.kind;
+  const look = crateLook(c);
+  fx.text(playerX, 2.6, 0.5, look.label, look.color, 1.1);
+  fx.portal(playerX, 0, new THREE.Color(look.color).getHex(), 0.9);
+  if (kind === 'weapon') setWeapon(c.weapon!);
   if (kind === 'rate') fireRate = Math.min(fireRate + 0.75, 12);
-  if (kind === 'gun') { gunCount = Math.min(gunCount + 1, 4); rebuildGuns(); }
+  if (kind === 'gun') { gunCount = Math.min(gunCount + 1, 4); syncSquad(); }
   if (kind === 'dmg') damage += 1;
   if (kind === 'speed') bulletSpeed = Math.min(bulletSpeed + 4, 50);
   if (kind === 'heal') lives = Math.min(PLAYER_LIVES, lives + 1);
@@ -659,6 +722,16 @@ function update(dt: number) {
 
   playerX += (targetX - playerX) * Math.min(1, dt * 14);
   player.position.x = playerX;
+  // Allies hold formation around you, trailing slightly when you move.
+  const slots = squadSlots(mates.length + 1);
+  mates.forEach((m, i) => {
+    const s = slots[i + 1];
+    const tx = THREE.MathUtils.clamp(playerX + s.x, -ROAD_HALF + 0.25, ROAD_HALF - 0.25);
+    m.x += (tx - m.x) * Math.min(1, dt * (10 - Math.min(6, s.z * 4)));
+    m.z += (s.z - m.z) * Math.min(1, dt * 6);
+    m.recoil = Math.max(0, m.recoil - dt * 10);
+    m.spawn = Math.min(1, m.spawn + dt * 2.5);
+  });
   hero.update(dt, time, {
     tilt: (playerX - targetX) * 0.3,
     strafe: Math.min(1, Math.abs(targetX - playerX) * 3),
@@ -689,17 +762,21 @@ function update(dt: number) {
   // Fire.
   fireTimer -= dt;
   if (fireTimer <= 0) {
-    fireTimer = 1 / fireRate;
+    const w = WEAPONS[weapon];
+    fireTimer = 1 / (fireRate * w.rate);
     hero.fire();
-    for (const ox of gunOffsets()) {
-      if (bullets.length < MAX_BULLETS) bullets.push({ x: playerX + ox, z: -1, vx: 0, alive: true });
+    const shooters = [{ x: playerX, z: 0 }, ...mates];
+    mates.forEach((m) => (m.recoil = 1));
+    for (const s of shooters) {
+      const jitter = w.jitter ? (Math.random() - 0.5) * 2 * w.jitter : 0;
+      if (bullets.length < MAX_BULLETS) bullets.push({ x: s.x + jitter, z: s.z - 1, vx: 0, alive: true, w: weapon });
     }
   }
 
   // Move gates & crates.
   for (const r of rows) {
     r.z += WORLD_SPEED * dt;
-    r.meshes.forEach((m) => (m.position.z = r.z));
+    r.vis.setZ(r.z);
     if (!r.passed && r.z >= 0) passGate(r);
   }
   rows = rows.filter((r) => (r.z > 3 ? (removeRow(r), false) : true));
@@ -713,7 +790,9 @@ function update(dt: number) {
   // Move bullets, pass gates, hit things.
   for (const b of bullets) {
     const prevZ = b.z;
-    b.z -= bulletSpeed * dt;
+    const w = WEAPONS[b.w];
+    const dmg = damage * w.dmg;
+    b.z -= bulletSpeed * w.speed * dt;
     b.x += b.vx * dt;
     if (b.z < SPAWN_Z - 5 || Math.abs(b.x) > ROAD_HALF) { b.alive = false; continue; }
 
@@ -721,12 +800,13 @@ function update(dt: number) {
       // Bullets punch through crates, damaging each crate once on the way.
       if (!c.open && b.crate !== c && Math.abs(b.x - c.x) < 1 && c.z > b.z - 0.9 && c.z < prevZ + 0.9) {
         b.crate = c;
-        c.hp -= damage;
+        c.hp -= dmg;
         if (c.hp <= 0) {
           c.open = true;
-          const u = UPGRADES[c.kind];
+          const u = crateLook(c);
           (c.mesh.material as THREE.MeshStandardMaterial).color.set(u.color);
           c.draw(u.label, u.color);
+          fx.sparks(c.x, 1, c.z, 0xffe080, 16, 5);
         } else {
           c.draw(String(c.hp), '#000a');
         }
@@ -735,20 +815,28 @@ function update(dt: number) {
     }
 
     for (const e of enemies) {
-      if (e.hp > 0 && Math.abs(b.x - e.x) < 0.55 * e.size + 0.1 && e.z > b.z - 0.6 * e.size && e.z < prevZ + 0.6 * e.size) {
+      if (e.hp > 0 && !b.pierced?.has(e) && Math.abs(b.x - e.x) < 0.55 * e.size + 0.1 && e.z > b.z - 0.6 * e.size && e.z < prevZ + 0.6 * e.size) {
+        damageEnemy(e, dmg);
+        if (w.pierce) {
+          // Railgun slugs keep going, hitting each enemy in the line once.
+          (b.pierced ??= new Set()).add(e);
+          fx.sparks(e.x, 0.9, e.z, 0xc070ff, 4, 4);
+          continue;
+        }
         b.alive = false;
-        e.hp -= damage;
-        e.flash = 0.08;
-        if (e.hp <= 0) {
-          score += e.points;
-          burst(e);
-          killDepth += (e.z - killDepth) * 0.05;
+        if (w.splash) {
+          // Rockets blow up: full damage to the target, 70% to everything nearby.
+          fx.explosion(e.x, e.z, w.splash);
+          for (const o of enemies) {
+            if (o !== e && o.hp > 0 && Math.hypot(o.x - e.x, o.z - e.z) < w.splash + 0.4 * o.size) damageEnemy(o, dmg * 0.7);
+          }
         }
         break;
       }
     }
   }
   bullets = bullets.filter((b) => b.alive);
+  for (const e of enemies) e.spawn = Math.min(1, e.spawn + dt * 2.2);
 
   // Enemies march toward the player.
   for (const e of enemies) {
@@ -787,6 +875,16 @@ function update(dt: number) {
   shots = shots.filter((sh) => {
     sh.x += sh.vx * dt;
     sh.z += sh.vz * dt;
+    // An ally in the way takes the hit instead (and is lost).
+    const hitMate = mates.findIndex((m) => m.spawn >= 1 && Math.abs(sh.x - m.x) < 0.35 && Math.abs(sh.z - m.z) < 0.4);
+    if (hitMate >= 0) {
+      const m = mates[hitMate];
+      fx.sparks(m.x, 0.9, m.z, 0xff4060, 16, 4);
+      fx.text(m.x, 2, m.z, '−1', '#ff6b81', 0.8);
+      mates.splice(hitMate, 1);
+      if (gateBonus > 1 - gunCount) gateBonus -= 1; else gunCount = Math.max(1, gunCount - 1);
+      return false;
+    }
     if (Math.abs(sh.x - playerX) < 0.45 && Math.abs(sh.z) < 0.5) {
       lives -= 1;
       perf = Math.max(PERF_MIN, perf - 0.12);
@@ -805,7 +903,7 @@ function update(dt: number) {
   // Crates: catch opened ones, lose them if they slip by.
   crates = crates.filter((c) => {
     if (c.open && c.z > -0.8 && c.z < 0.8 && Math.abs(c.x - playerX) < 1.3) {
-      collect(c.kind);
+      collect(c);
       removeCrate(c);
       return false;
     }
@@ -817,7 +915,10 @@ function update(dt: number) {
 }
 
 function render(dt: number) {
-  drawBolts(bullets);
+  drawProjectiles(bullets, time);
+  drawSquad(mates, weapon, time, Math.min(1, Math.abs(targetX - playerX) * 3));
+  for (const r of rows) r.vis.update(dt, time);
+  fx.update(state === 'play' ? dt : 0);
 
   const counts: Record<string, number> = {};
   for (const k in enemyMeshes) counts[k] = 0;
@@ -833,7 +934,9 @@ function render(dt: number) {
     // Turn to face where they're heading and bank into the turn.
     const yaw = Math.atan2(e.vx, e.speed);
     tmp.rotation.set(0.2, yaw, Math.sin(phase) * 0.08 - e.vx * 0.06, 'YXZ');
-    tmp.scale.setScalar(e.size);
+    // Materialise: scale up from nothing with a little overshoot.
+    const k = e.spawn, back = 1 + 2.2 * Math.pow(k - 1, 3) + 1.2 * Math.pow(k - 1, 2);
+    tmp.scale.setScalar(e.size * Math.max(0.01, back));
     tmp.updateMatrix();
     m.body.setMatrixAt(i, tmp.matrix);
     m.accent.setMatrixAt(i, tmp.matrix);
@@ -941,7 +1044,6 @@ function render(dt: number) {
   composer.render();
 }
 
-rebuildGuns();
 let last = performance.now(), hudTimer = 0;
 renderer.setAnimationLoop((now) => {
   const dt = Math.min((now - last) / 1000, 1 / 20); // clamp so tab switches don't teleport things

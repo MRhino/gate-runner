@@ -13,19 +13,20 @@ import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js
 // Models face +z (toward the player) with their feet at y = 0.
 
 export type V3 = [number, number, number];
-export type Part = { geo: THREE.BufferGeometry; color?: number; pos?: V3; rot?: V3; scale?: V3 };
+// `k` scales the vertex colour; > 1 makes that part bright enough to bloom (glowing details).
+export type Part = { geo: THREE.BufferGeometry; color?: number; pos?: V3; rot?: V3; scale?: V3; k?: number };
 
 const m4 = new THREE.Matrix4();
 const q = new THREE.Quaternion();
 const eul = new THREE.Euler();
 
 export function merge(parts: Part[]): THREE.BufferGeometry {
-  const geos = parts.map(({ geo, color = 0xffffff, pos = [0, 0, 0], rot = [0, 0, 0], scale = [1, 1, 1] }) => {
+  const geos = parts.map(({ geo, color = 0xffffff, pos = [0, 0, 0], rot = [0, 0, 0], scale = [1, 1, 1], k = 1 }) => {
     const g = geo.index ? geo.toNonIndexed() : geo.clone();
     g.deleteAttribute('uv');
     m4.compose(new THREE.Vector3(...pos), q.setFromEuler(eul.set(...rot)), new THREE.Vector3(...scale));
     g.applyMatrix4(m4);
-    const c = new THREE.Color(color);
+    const c = new THREE.Color(color).multiplyScalar(k);
     const n = g.attributes.position.count;
     const cols = new Float32Array(n * 3);
     for (let i = 0; i < n; i++) cols.set([c.r, c.g, c.b], i * 3);

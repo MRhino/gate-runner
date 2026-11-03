@@ -1,5 +1,6 @@
 import * as THREE from 'three';
 import { merge, egg, HIP_Y, type Part, type V3 } from './models';
+import { WEAPONS, WEAPON_KINDS, buildWeaponGeo, type WeaponKind } from './weapons';
 
 // The player: an armoured trooper with a glowing visor and chest core, layered pauldrons,
 // a twin-thruster jetpack with live flames, and a modular energy cannon whose barrels are
@@ -156,58 +157,36 @@ export function createHero(toon: THREE.Material) {
     return l;
   });
 
-  // ---------- Energy cannon ----------
+  // ---------- Weapon (swappable) ----------
   const gun = new THREE.Group();
   gun.position.set(0, 0.9, 0);
   torso.add(gun);
-  const metal = new THREE.MeshStandardMaterial({ color: 0x3a3f55, metalness: 0.8, roughness: 0.3 });
-  const accent = new THREE.MeshStandardMaterial({ color: YELLOW, metalness: 0.3, roughness: 0.5 });
-  const barrelGeo = merge([
-    { geo: cyl(0.045, 0.055, 0.62, 20), color: 0xffffff, pos: [0, 0, -0.31], rot: [Math.PI / 2, 0, 0] },
-    ...[0.12, 0.3, 0.48].map((z): Part => ({ geo: tor(0.058, 0.014, 20), color: 0x9aa4b8, pos: [0, 0, -z] })),
-    { geo: cyl(0.07, 0.06, 0.08, 20), color: 0x9aa4b8, pos: [0, 0, -0.66], rot: [Math.PI / 2, 0, 0] }, // muzzle
-  ]);
-  const barrelMat = new THREE.MeshStandardMaterial({ vertexColors: true, color: 0x4a5070, metalness: 0.8, roughness: 0.3 });
-  const coilGeo = cyl(0.064, 0.064, 0.05, 20).rotateX(Math.PI / 2);
-  const coilMat = glowMat(CYAN, 2.0);
+  const gunMat = new THREE.MeshStandardMaterial({ vertexColors: true, metalness: 0.6, roughness: 0.35 });
   const flashMat = new THREE.MeshBasicMaterial({ map: flashTexture(), transparent: true, blending: THREE.AdditiveBlending, depthWrite: false });
-  const flashGeo = new THREE.PlaneGeometry(0.6, 0.6);
-  let muzzles: THREE.Mesh[] = [];
+  const flash = new THREE.Mesh(new THREE.PlaneGeometry(0.7, 0.7), flashMat);
+  let spinner: THREE.Mesh | null = null;
+  let weaponKind: WeaponKind = 'blaster';
 
-  function setBarrels(offsets: number[]) {
+  function setWeapon(kind: WeaponKind) {
+    weaponKind = kind;
     gun.clear();
-    muzzles = [];
-    const width = offsets[offsets.length - 1] - offsets[0];
-    // Housing: a central body the hands grip, plus a rail spanning all barrels.
-    const body = new THREE.Mesh(box(0.26, 0.16, 0.42), metal);
-    body.position.set(0, -0.02, -0.25);
-    const stripe = new THREE.Mesh(box(0.27, 0.04, 0.3), accent);
-    stripe.position.set(0, 0.06, -0.28);
-    gun.add(body, stripe);
-    if (width > 0) {
-      const rail = new THREE.Mesh(box(width + 0.16, 0.08, 0.2), metal);
-      rail.position.set(0, 0, -0.38);
-      const railTrim = new THREE.Mesh(box(width + 0.18, 0.02, 0.06), accent);
-      railTrim.position.set(0, 0.05, -0.44);
-      gun.add(rail, railTrim);
-    }
-    for (const x of offsets) {
-      const b = new THREE.Mesh(barrelGeo, barrelMat);
-      b.position.set(x, 0, -0.3);
-      const coil = new THREE.Mesh(coilGeo, coilMat);
-      coil.position.set(x, 0, -0.84); // glowing band around the barrel near the muzzle
-      const flash = new THREE.Mesh(flashGeo, flashMat);
-      flash.position.set(x, 0, -1.05);
-      flash.visible = false;
-      gun.add(b, coil, flash);
-      muzzles.push(flash);
-    }
+    const { gun: g, spin, muzzleZ } = buildWeaponGeo(kind, 1.4);
+    const m = new THREE.Mesh(g, gunMat);
+    m.castShadow = true;
+    gun.add(m);
+    spinner = spin ? new THREE.Mesh(spin, gunMat) : null;
+    if (spinner) gun.add(spinner);
+    flash.position.set(0, 0.02, muzzleZ - 0.1);
+    flash.visible = false;
+    gun.add(flash);
+    (flashMat.color as THREE.Color).set(WEAPONS[kind].color).lerp(new THREE.Color(0xffffff), 0.5);
   }
 
-  let recoil = 0, flashT = 0;
+  let recoil = 0, flashT = 0, spinSpeed = 0;
   function fire() {
     recoil = 1;
     flashT = 0.05;
+    spinSpeed = 30;
   }
 
   function update(dt: number, t: number, opts: { tilt: number; strafe: number; camera: THREE.Camera }) {
@@ -215,18 +194,21 @@ export function createHero(toon: THREE.Material) {
     torso.position.y = Math.sin(t * 2.2) * 0.012;
     torso.rotation.z = opts.tilt;
     legs.forEach((l, i) => (l.rotation.x = Math.sin(t * 18 + i * Math.PI) * 0.6 * opts.strafe));
-    // Cannon kick.
+    // Kick: rockets shove hard, gatling barely moves.
     recoil = Math.max(0, recoil - dt * 12);
-    gun.position.z = recoil * 0.06;
-    // Muzzle flashes face the camera with a random spin and size.
+    gun.position.z = recoil * (weaponKind === 'rocket' ? 0.16 : weaponKind === 'gatling' ? 0.02 : 0.06);
+    gun.rotation.x = recoil * (weaponKind === 'rocket' ? 0.12 : 0.03);
+    if (spinner) {
+      spinner.rotation.z += spinSpeed * dt;
+      spinSpeed = Math.max(4, spinSpeed - dt * 40);
+    }
+    // Muzzle flash faces the camera with a random spin and size.
     flashT -= dt;
-    for (const f of muzzles) {
-      f.visible = flashT > 0;
-      if (f.visible) {
-        f.quaternion.copy(opts.camera.quaternion);
-        f.rotateZ(Math.random() * Math.PI);
-        f.scale.setScalar(0.7 + Math.random() * 0.6);
-      }
+    flash.visible = flashT > 0;
+    if (flash.visible) {
+      flash.quaternion.copy(opts.camera.quaternion);
+      flash.rotateZ(Math.random() * Math.PI);
+      flash.scale.setScalar((weaponKind === 'rocket' ? 1.8 : weaponKind === 'gatling' ? 0.7 : 1) * (0.7 + Math.random() * 0.6));
     }
     // Thruster flames flicker; glows pulse.
     flames.forEach((f, i) => {
@@ -234,15 +216,83 @@ export function createHero(toon: THREE.Material) {
       f.m.scale.set(f.w, f.h * k * (1 + opts.strafe * 0.6), f.w);
     });
     const pulse = 0.85 + Math.sin(t * 4) * 0.15;
-    (core.material as THREE.MeshBasicMaterial).color.setScalar(1).multiply(new THREE.Color(CYAN)).multiplyScalar(2.6 * pulse);
+    (core.material as THREE.MeshBasicMaterial).color.set(CYAN).multiplyScalar(2.6 * pulse);
     antennaTip.visible = Math.sin(t * 5) > -0.3;
   }
 
-  return { root, setBarrels, fire, update };
+  setWeapon('blaster');
+  return { root, setWeapon, fire, update };
 }
 
-// Player bolts: a white-hot core, a cyan glow sleeve and a fading trail behind.
-export function createBoltMeshes(scene: THREE.Scene, max: number) {
+// ---------- Squad mates ----------
+// Lighter troopers that run in formation around you, all carrying your current weapon.
+// Drawn with instancing so a full squad of 30 stays cheap.
+export function createSquad(scene: THREE.Scene, toon: THREE.Material, max: number) {
+  const body = merge([
+    { geo: egg(0.27, 0.56, -0.1, 16), color: CHARCOAL, pos: [0, 0.78, 0] },
+    { geo: new THREE.SphereGeometry(0.26, 16, 10), color: 0xe0a92a, pos: [0, 0.86, -0.05], scale: [1.05, 0.85, 0.75] },
+    { geo: new THREE.CylinderGeometry(0.29, 0.29, 0.08, 16), color: RUBBER, pos: [0, 0.52, 0] },
+    ...[-1, 1].flatMap((s): Part[] => [
+      { geo: new THREE.SphereGeometry(0.17, 12, 8), color: 0xe0a92a, pos: [s * 0.33, 0.98, 0], scale: [1.1, 0.7, 1.1] },
+      between([s * 0.33, 0.95, 0], [s * 0.34, 0.78, -0.16], 0.07, CHARCOAL),
+      between([s * 0.34, 0.78, -0.16], [s * 0.15, 0.88, -0.38], 0.075, 0xe0a92a),
+    ]),
+    { geo: new THREE.SphereGeometry(0.25, 18, 12), color: 0xe0a92a, pos: [0, 1.27, 0] },
+    { geo: new THREE.SphereGeometry(0.21, 18, 10), color: 0x0d1b2a, pos: [0, 1.29, -0.07], scale: [1.1, 0.55, 0.92] },
+    { geo: box(0.32, 0.035, 0.02), pos: [0, 1.3, -0.265], color: CYAN, k: 2 },
+    { geo: box(0.4, 0.44, 0.18), color: CHARCOAL, pos: [0, 0.85, 0.26] },
+    { geo: box(0.06, 0.09, 0.36), color: CHARCOAL, pos: [0, 1.52, 0.02] },
+  ]);
+  const leg = merge([
+    { geo: new THREE.CylinderGeometry(0.095, 0.085, 0.3, 10), color: CHARCOAL, pos: [0, -0.15, 0] },
+    { geo: box(0.17, 0.09, 0.26), color: RUBBER, pos: [0, -HIP_Y + 0.05, -0.04] },
+  ]);
+  const mk = (geo: THREE.BufferGeometry, mat: THREE.Material, shadow = true) => {
+    const m = new THREE.InstancedMesh(geo, mat, max);
+    m.frustumCulled = false;
+    m.castShadow = shadow;
+    m.count = 0;
+    scene.add(m);
+    return m;
+  };
+  const bodies = mk(body, toon), legL = mk(leg, toon), legR = mk(leg, toon);
+  const gunMat = new THREE.MeshStandardMaterial({ vertexColors: true, metalness: 0.6, roughness: 0.35 });
+  const guns = {} as Record<WeaponKind, THREE.InstancedMesh>;
+  for (const k of WEAPON_KINDS) {
+    const { gun: g, spin } = buildWeaponGeo(k, 0.6);
+    guns[k] = mk(spin ? merge([{ geo: g }, { geo: spin }]) : g, gunMat, false);
+  }
+  const o = new THREE.Object3D(), l = new THREE.Object3D();
+  return (mates: { x: number; z: number; recoil: number; spawn: number }[], weapon: WeaponKind, t: number, strafe: number) => {
+    mates.forEach((m, i) => {
+      // Pop in with a little overshoot when they join.
+      const c = m.spawn - 1, s = 1 + 2.2 * c * c * c + 1.2 * c * c; // 0 -> overshoot -> 1
+      o.position.set(m.x, Math.sin(t * 2.2 + i) * 0.01, m.z);
+      o.rotation.set(0, 0, 0);
+      o.scale.setScalar(Math.max(0.01, s) * 0.92);
+      o.updateMatrix();
+      bodies.setMatrixAt(i, o.matrix);
+      for (const [mesh, side] of [[legL, -1], [legR, 1]] as const) {
+        l.position.set(side * 0.14, HIP_Y, 0);
+        l.rotation.set(Math.sin(t * 18 + i + (side > 0 ? Math.PI : 0)) * 0.6 * strafe, 0, 0);
+        l.updateMatrix();
+        l.matrix.premultiply(o.matrix);
+        mesh.setMatrixAt(i, l.matrix);
+      }
+      l.position.set(0, 0.88, m.recoil * 0.08);
+      l.rotation.set(0, 0, 0);
+      l.updateMatrix();
+      l.matrix.premultiply(o.matrix);
+      guns[weapon].setMatrixAt(i, l.matrix);
+    });
+    for (const mesh of [bodies, legL, legR]) { mesh.count = mates.length; mesh.instanceMatrix.needsUpdate = true; }
+    for (const k of WEAPON_KINDS) { guns[k].count = k === weapon ? mates.length : 0; guns[k].instanceMatrix.needsUpdate = true; }
+  };
+}
+
+// ---------- Projectiles ----------
+// One look per weapon: blaster bolts, gatling tracers, rockets with exhaust, and railgun beams.
+export function createProjectiles(scene: THREE.Scene, max: number) {
   const mk = (geo: THREE.BufferGeometry, mat: THREE.Material) => {
     const m = new THREE.InstancedMesh(geo, mat, max);
     m.frustumCulled = false;
@@ -250,25 +300,51 @@ export function createBoltMeshes(scene: THREE.Scene, max: number) {
     scene.add(m);
     return m;
   };
-  const core = mk(new THREE.CapsuleGeometry(0.05, 0.4, 4, 10).rotateX(Math.PI / 2), new THREE.MeshBasicMaterial({ color: new THREE.Color(0xe8fdff).multiplyScalar(0.95) }));
-  const sleeve = mk(new THREE.CapsuleGeometry(0.11, 0.5, 4, 12).rotateX(Math.PI / 2), glowMat(CYAN, 0.9, true, 0.28));
-  const trail = mk(new THREE.ConeGeometry(0.09, 1, 12, 1, true).rotateX(Math.PI / 2).translate(0, 0, 0.5), glowMat(0x2ab8ff, 0.9, true, 0.22));
+  const basic = (c: number, k: number) => new THREE.MeshBasicMaterial({ color: new THREE.Color(c).multiplyScalar(k) });
+  const capsule = (r: number, l: number) => new THREE.CapsuleGeometry(r, l, 4, 10).rotateX(Math.PI / 2);
+  const trailCone = (r: number) => new THREE.ConeGeometry(r, 1, 12, 1, true).rotateX(Math.PI / 2).translate(0, 0, 0.5);
+  const sets: Record<WeaponKind, { m: THREE.InstancedMesh; sz: V3; dz?: number }[]> = {
+    blaster: [
+      { m: mk(capsule(0.05, 0.4), basic(0xe8fdff, 0.95)), sz: [1, 1, 1] },
+      { m: mk(capsule(0.11, 0.5), glowMat(CYAN, 0.9, true, 0.28)), sz: [1, 1, 1] },
+      { m: mk(trailCone(0.09), glowMat(0x2ab8ff, 0.9, true, 0.22)), sz: [1, 1, 1.4] },
+    ],
+    gatling: [
+      { m: mk(capsule(0.03, 0.3), basic(0xfff2c0, 0.95)), sz: [1, 1, 1] },
+      { m: mk(trailCone(0.05), glowMat(0xffb020, 0.9, true, 0.35)), sz: [1, 1, 1.2] },
+    ],
+    rocket: [
+      // Rocket body: white tube, red nose, dark fins.
+      { m: mk(merge([
+        { geo: new THREE.CylinderGeometry(0.07, 0.07, 0.4, 12).rotateX(Math.PI / 2), color: 0xeeeeee },
+        { geo: new THREE.ConeGeometry(0.07, 0.16, 12).rotateX(-Math.PI / 2), color: 0xd03020, pos: [0, 0, -0.28] },
+        ...[0, 1, 2, 3].map((i): Part => ({ geo: box(0.02, 0.12, 0.12), color: 0x333333, pos: [0, 0, 0.16], rot: [0, 0, (i * Math.PI) / 2], scale: [1, 1, 1] })),
+      ]), new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.5 })), sz: [1.3, 1.3, 1.3] },
+      { m: mk(new THREE.SphereGeometry(0.08, 10, 8).translate(0, 0, 0.28), basic(0xfff0b0, 2.2)), sz: [1.3, 1.3, 1.3] },
+      { m: mk(trailCone(0.12), glowMat(0xff6a20, 1.2, true, 0.55)), sz: [1, 1, 1.6], dz: 0.35 },
+      { m: mk(trailCone(0.25), glowMat(0x888888, 0.5, true, 0.18)), sz: [1, 1, 2.6], dz: 0.5 }, // smoke
+    ],
+    rail: [
+      { m: mk(capsule(0.04, 1.6), basic(0xffffff, 1.2)), sz: [1, 1, 1] },
+      { m: mk(capsule(0.13, 1.8), glowMat(0xc070ff, 1.1, true, 0.4)), sz: [1, 1, 1] },
+      { m: mk(trailCone(0.12), glowMat(0x9a40ff, 1, true, 0.3)), sz: [1, 1, 3], dz: 0.9 },
+    ],
+  };
+  const counts = {} as Record<WeaponKind, number>;
   const o = new THREE.Object3D();
-  return (bullets: { x: number; z: number }[]) => {
-    bullets.forEach((b, i) => {
-      o.position.set(b.x, 0.9, b.z);
-      o.rotation.set(0, 0, 0);
-      o.scale.set(1, 1, 1);
-      o.updateMatrix();
-      core.setMatrixAt(i, o.matrix);
-      sleeve.setMatrixAt(i, o.matrix);
-      o.scale.set(1, 1, 1.4);
-      o.updateMatrix();
-      trail.setMatrixAt(i, o.matrix);
-    });
-    for (const m of [core, sleeve, trail]) {
-      m.count = bullets.length;
-      m.instanceMatrix.needsUpdate = true;
+  return (bullets: { x: number; z: number; w: WeaponKind }[], t: number) => {
+    for (const k of WEAPON_KINDS) counts[k] = 0;
+    for (const b of bullets) {
+      const i = counts[b.w]++;
+      for (const part of sets[b.w]) {
+        o.position.set(b.x, 0.9, b.z + (part.dz ?? 0));
+        o.rotation.set(0, 0, b.w === 'rocket' ? t * 12 : 0);
+        o.scale.set(...part.sz);
+        if (b.w === 'rocket' && part.dz) o.scale.z *= 0.8 + Math.random() * 0.4; // flickering exhaust
+        o.updateMatrix();
+        part.m.setMatrixAt(i, o.matrix);
+      }
     }
+    for (const k of WEAPON_KINDS) for (const part of sets[k]) { part.m.count = counts[k]; part.m.instanceMatrix.needsUpdate = true; }
   };
 }
