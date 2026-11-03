@@ -808,7 +808,7 @@ function update(dt: number) {
           c.draw(u.label, u.color);
           fx.sparks(c.x, 1, c.z, 0xffe080, 16, 5);
         } else {
-          c.draw(String(c.hp), '#000a');
+          c.draw(String(Math.ceil(c.hp)), '#000a'); // weapon damage can be fractional (e.g. gatling 0.42)
         }
         break;
       }
