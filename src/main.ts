@@ -138,7 +138,7 @@ const ENEMY_TYPES: Record<EnemyKind, EnemyType> = {
   purple: { hp: 25, speed: 0.85, size: 1.35, color: 0x9c27b0, dmg: 1, points: 100, wave: 3, weight: 7 },
   orange: { hp: 60, speed: 0.75, size: 1.6, color: 0xff7a1a, dmg: 2, points: 250, wave: 5, weight: 4 },
   red: { hp: 150, speed: 0.65, size: 1.9, color: 0xe53935, dmg: 2, points: 600, wave: 7, weight: 2 },
-  boss: { hp: 600, speed: 0.4, size: 3, color: 0x3a0a0a, dmg: 3, points: 3000, wave: 5, weight: 0 },
+  boss: { hp: 350, speed: 0.4, size: 3, color: 0x3a0a0a, dmg: 3, points: 3000, wave: 5, weight: 0 },
 };
 type UpgradeKind = 'rate' | 'gun' | 'dmg' | 'speed';
 type Crate = {
@@ -165,7 +165,8 @@ let fireTimer = 0, enemyTimer = 0, rowTimer = 2, crateTimer = 6;
 let hurtFlash = 0;
 
 // Bullets per volley = gun barrels + whatever the gates have added.
-const shotsPerVolley = () => Math.max(1, gunCount + gateBonus);
+const MAX_SHOTS = 30;
+const shotsPerVolley = () => THREE.MathUtils.clamp(gunCount + gateBonus, 1, MAX_SHOTS);
 const gunOffsets = () =>
   Array.from({ length: gunCount }, (_, i) => (i - (gunCount - 1) / 2) * 0.35);
 
@@ -211,7 +212,7 @@ const rand = (a: number, b: number) => a + Math.random() * (b - a);
 const pick = <T,>(arr: T[]) => arr[Math.floor(Math.random() * arr.length)];
 
 function randomOp(good: boolean): GateOp {
-  return { n: good ? pick([1, 2, 2, 3, 3, 5]) : -pick([1, 2, 3]) };
+  return { n: good ? pick([1, 1, 1, 2, 2, 3]) : -pick([1, 2, 2, 3, 4]) };
 }
 const opText = (o: GateOp) => (o.n > 0 ? '+' : '−') + Math.abs(o.n);
 const isGood = (o: GateOp) => o.n > 0;
@@ -219,7 +220,7 @@ const isGood = (o: GateOp) => o.n > 0;
 function spawnRow() {
   // Mostly one good + one bad side; sometimes both good with different values.
   const goodLeft = Math.random() < 0.5;
-  const bothGood = Math.random() < 0.25;
+  const bothGood = Math.random() < 0.1;
   const ops: [GateOp, GateOp] = [
     randomOp(bothGood || goodLeft),
     randomOp(bothGood || !goodLeft),
@@ -278,7 +279,7 @@ function startWave(n: number) {
 
 function spawnCrate() {
   const kind = pick<UpgradeKind>(['rate', 'gun', 'dmg', 'speed']);
-  const maxHp = Math.round(30 + time * 1.5);
+  const maxHp = Math.round(40 + time * 3);
   const mesh = new THREE.Mesh(
     new THREE.BoxGeometry(1.6, 1.6, 1.6),
     new THREE.MeshStandardMaterial({ color: 0x8a6a4a }),
@@ -318,7 +319,7 @@ function removeRow(r: GateRow) {
 function passGate(r: GateRow) {
   r.passed = true;
   const i = playerX < r.mid ? 0 : 1;
-  gateBonus = Math.max(1 - gunCount, gateBonus + r.ops[i].n);
+  gateBonus = THREE.MathUtils.clamp(gateBonus + r.ops[i].n, 1 - gunCount, MAX_SHOTS - gunCount);
   const m = r.meshes[i].material as THREE.MeshBasicMaterial;
   m.opacity = 0.3;
   navigator.vibrate?.(r.ops[i].n > 0 ? 30 : 80);
@@ -420,10 +421,10 @@ function gameOver() {
 $('best').textContent = best() ? `Best ${best()}` : '';
 
 function collect(kind: UpgradeKind) {
-  if (kind === 'rate') fireRate = Math.min(fireRate * 1.3, 20);
-  if (kind === 'gun') { gunCount = Math.min(gunCount + 1, 6); rebuildGuns(); }
+  if (kind === 'rate') fireRate = Math.min(fireRate + 0.75, 12);
+  if (kind === 'gun') { gunCount = Math.min(gunCount + 1, 4); rebuildGuns(); }
   if (kind === 'dmg') damage += 1;
-  if (kind === 'speed') bulletSpeed = Math.min(bulletSpeed * 1.2, 70);
+  if (kind === 'speed') bulletSpeed = Math.min(bulletSpeed + 4, 50);
   navigator.vibrate?.(40);
 }
 
@@ -448,9 +449,9 @@ function update(dt: number) {
     enemyTimer = Math.max(0.8, 2.2 * Math.pow(0.93, wave - 1));
   }
   rowTimer -= dt;
-  if (rowTimer <= 0) { spawnRow(); rowTimer = rand(3.5, 5); }
+  if (rowTimer <= 0) { spawnRow(); rowTimer = rand(6, 8); }
   crateTimer -= dt;
-  if (crateTimer <= 0) { spawnCrate(); crateTimer = rand(9, 13); }
+  if (crateTimer <= 0) { spawnCrate(); crateTimer = rand(13, 17); }
 
   // Fire.
   fireTimer -= dt;
@@ -506,7 +507,7 @@ function update(dt: number) {
     if (!b.alive) continue;
 
     for (const e of enemies) {
-      if (e.hp > 0 && Math.abs(b.x - e.x) < 0.45 && Math.abs(b.z - e.z) < 0.5) {
+      if (e.hp > 0 && Math.abs(b.x - e.x) < 0.45 * e.size && Math.abs(b.z - e.z) < 0.5 * e.size) {
         b.alive = false;
         e.hp -= damage;
         if (e.hp <= 0) score += e.points;
