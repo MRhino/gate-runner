@@ -4,7 +4,7 @@ import { execSync } from 'node:child_process';
 import pkg from './package.json' with { type: 'json' };
 
 // Shown on the start screen so you can tell which build you're running.
-const commit = (process.env.VERCEL_GIT_COMMIT_SHA ?? (() => {
+const commit = (process.env.VERCEL_GIT_COMMIT_SHA || (() => {
   try { return execSync('git rev-parse HEAD').toString().trim(); } catch { return 'dev'; }
 })()).slice(0, 7);
 

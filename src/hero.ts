@@ -55,15 +55,18 @@ function flashTexture() {
 // clearly different colour (green -> blue -> purple -> orange -> red) and makes shots bigger.
 export const DAMAGE_TIERS = [0, 0x3dff6e, 0x2f8cff, 0xb04dff, 0xff9a1a, 0xff2a3a];
 export const tierOf = (damage: number) => Math.min(DAMAGE_TIERS.length - 1, Math.max(0, Math.round(damage) - 1));
+export const tierCss = (damage: number) => '#' + new THREE.Color(DAMAGE_TIERS[tierOf(damage)] || 0xffffff).getHexString();
+export function applyTierEmissive(mat: THREE.MeshStandardMaterial, tier: number) {
+  mat.emissive.set(tier ? DAMAGE_TIERS[tier] : 0x000000).multiplyScalar(0.8);
+}
 // Tier colour for a projectile part. Tier 0 keeps the weapon's own look. Glow sleeves/trails take
-// the tier colour fully; solid cores only take a tint and stay under the bloom threshold.
-function tiered(base: THREE.Color, tier: number, out: THREE.Color) {
+// the tier colour at the same peak brightness as their base (so tiers never add bloom); solid
+// cores only take a pale tint and stay under the bloom threshold.
+function tiered(base: THREE.Color, tier: number, core: boolean, out: THREE.Color) {
   if (tier === 0) return out.copy(base);
   const c = new THREE.Color(DAMAGE_TIERS[tier]);
-  if (Math.max(base.r, base.g, base.b) <= 1 && base.r + base.g + base.b > 2.4) {
-    return out.copy(c).lerp(new THREE.Color(1, 1, 1), 0.45).multiplyScalar(0.95); // core: pale tier tint
-  }
-  return out.copy(c).multiplyScalar(Math.max(base.r, base.g, base.b) * 1.15);
+  if (core) return out.copy(c).lerp(new THREE.Color(1, 1, 1), 0.45).multiplyScalar(0.95);
+  return out.copy(c).multiplyScalar(Math.max(base.r, base.g, base.b) / Math.max(c.r, c.g, c.b));
 }
 
 export function createHero(toon: THREE.Material) {
@@ -185,13 +188,15 @@ export function createHero(toon: THREE.Material) {
   let power = 0;
   // Gun glows in the current damage tier's colour.
   function setPower(tier: number) {
+    if (tier === power) return;
     power = tier;
-    gunMat.emissive.set(tier ? DAMAGE_TIERS[tier] : 0x000000).multiplyScalar(0.8);
+    applyTierEmissive(gunMat, tier);
   }
 
   function setWeapon(kind: WeaponKind) {
     weaponKind = kind;
-    setPower(power);
+    // Free the previous gun's geometry before building the new one.
+    gun.traverse((o) => { const m = o as THREE.Mesh; if (m.isMesh && m !== flash) m.geometry.dispose(); });
     gun.clear();
     const { gun: g, spin, muzzleZ } = buildWeaponGeo(kind, 1.4);
     const m = new THREE.Mesh(g, gunMat);
@@ -287,7 +292,7 @@ export function createSquad(scene: THREE.Scene, toon: THREE.Material, max: numbe
   }
   const o = new THREE.Object3D(), l = new THREE.Object3D();
   return (mates: { x: number; z: number; recoil: number; spawn: number }[], weapon: WeaponKind, t: number, strafe: number, power = 0) => {
-    gunMat.emissive.set(power ? DAMAGE_TIERS[power] : 0x000000).multiplyScalar(0.8);
+    applyTierEmissive(gunMat, power);
     mates.forEach((m, i) => {
       // Pop in with a little overshoot when they join.
       const c = m.spawn - 1, s = 1 + 2.2 * c * c * c + 1.2 * c * c; // 0 -> overshoot -> 1
@@ -327,14 +332,14 @@ export function createProjectiles(scene: THREE.Scene, max: number) {
   const basic = (c: number, k: number) => new THREE.MeshBasicMaterial({ color: new THREE.Color(c).multiplyScalar(k) });
   const capsule = (r: number, l: number) => new THREE.CapsuleGeometry(r, l, 4, 10).rotateX(Math.PI / 2);
   const trailCone = (r: number) => new THREE.ConeGeometry(r, 1, 12, 1, true).rotateX(Math.PI / 2).translate(0, 0, 0.5);
-  const sets: Record<WeaponKind, { m: THREE.InstancedMesh; sz: V3; dz?: number }[]> = {
+  const sets: Record<WeaponKind, { m: THREE.InstancedMesh; sz: V3; dz?: number; core?: boolean }[]> = {
     blaster: [
-      { m: mk(capsule(0.05, 0.4), basic(0xe8fdff, 0.95)), sz: [1, 1, 1] },
+      { m: mk(capsule(0.05, 0.4), basic(0xe8fdff, 0.95)), sz: [1, 1, 1], core: true },
       { m: mk(capsule(0.11, 0.5), glowMat(CYAN, 0.9, true, 0.28)), sz: [1, 1, 1] },
       { m: mk(trailCone(0.09), glowMat(0x2ab8ff, 0.9, true, 0.22)), sz: [1, 1, 1.4] },
     ],
     gatling: [
-      { m: mk(capsule(0.03, 0.3), basic(0xfff2c0, 0.95)), sz: [1, 1, 1] },
+      { m: mk(capsule(0.03, 0.3), basic(0xfff2c0, 0.95)), sz: [1, 1, 1], core: true },
       { m: mk(trailCone(0.05), glowMat(0xffb020, 0.9, true, 0.35)), sz: [1, 1, 1.2] },
     ],
     rocket: [
@@ -368,7 +373,7 @@ export function createProjectiles(scene: THREE.Scene, max: number) {
       lastPower = power;
       for (const k of WEAPON_KINDS) for (const part of sets[k]) {
         const base = bases.get(part.m);
-        if (base) tiered(base, power, (part.m.material as THREE.MeshBasicMaterial).color);
+        if (base) tiered(base, power, !!part.core, (part.m.material as THREE.MeshBasicMaterial).color);
       }
     }
     const grow = 1 + power * 0.15; // each tier ~15% bigger shots

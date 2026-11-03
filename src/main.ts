@@ -3,7 +3,7 @@ import { registerSW } from 'virtual:pwa-register';
 import './style.css';
 import { buildEnemyModels, HIP_Y, type EnemyModel } from './models';
 import { createAmbient } from './env';
-import { createHero, createSquad, createProjectiles, tierOf, DAMAGE_TIERS } from './hero';
+import { createHero, createSquad, createProjectiles, tierOf, tierCss } from './hero';
 import { createFx } from './fx';
 import { createGateRow, type GateRowVisual } from './gates';
 import { WEAPONS, WEAPON_KINDS, type WeaponKind } from './weapons';
@@ -77,7 +77,7 @@ Object.assign(sun.shadow.camera, { left: -10, right: 10, top: 10, bottom: -40 })
 scene.add(sun);
 
 // Bloom makes the emissive bits (bullets, enemy shots, lamps, visors) glow.
-// Runs at half resolution to keep it cheap on phones.
+// Runs at reduced resolution to keep it cheap on phones (see resize).
 const composer = new EffectComposer(renderer);
 composer.addPass(new RenderPass(scene, camera));
 // Threshold above 1: only things deliberately made brighter than white glow (flames, shots,
@@ -90,7 +90,9 @@ function resize() {
   const w = innerWidth, h = innerHeight;
   renderer.setSize(w, h);
   composer.setSize(w, h);
-  bloom.resolution.set(w / 2, h / 2);
+  // Composer sizes bloom to the high-DPI buffer; resize it to CSS pixels instead (the pass halves
+  // that again internally), which is visually identical for a soft glow and far cheaper on phones.
+  bloom.setSize(w, h);
   camera.aspect = w / h;
   // Keep the whole road visible on narrow portrait screens.
   camera.fov = w / h < 0.6 ? 62 : 55;
@@ -234,7 +236,7 @@ const ENEMY_TYPES: Record<EnemyKind, EnemyType> = {
 };
 type UpgradeKind = 'rate' | 'gun' | 'dmg' | 'speed' | 'heal' | 'weapon';
 type Crate = {
-  x: number; z: number; hp: number; maxHp: number; open: boolean; kind: UpgradeKind; weapon?: WeaponKind;
+  x: number; z: number; hp: number; maxHp: number; open: boolean; kind: UpgradeKind; weapon?: WeaponKind; shown?: number;
   mesh: THREE.Mesh; sprite: THREE.Sprite; draw: (t: string, bg: string, fg?: string) => void;
 };
 
@@ -433,6 +435,7 @@ const barFill = makeBars(0xffffff, 11);
 
 const tmp = new THREE.Object3D();
 const tmpColor = new THREE.Color();
+const legTmp = new THREE.Object3D(), limbScratch = new THREE.Color(); // reused every frame, no GC churn
 const WHITE = new THREE.Color(0xffffff);
 
 // ---------- Spawning ----------
@@ -613,7 +616,7 @@ function updateHud() {
   $('score').textContent = String(score);
   $('lives').textContent = '♥'.repeat(Math.max(lives, 0)) + '♡'.repeat(PLAYER_LIVES - Math.max(lives, 0));
   $('stats').innerHTML =
-    `wave ${wave} · pressure ${pressure().toFixed(2)}<br>${WEAPONS[weapon].name} · squad ${shotsPerVolley()} · <span style="color:#${new THREE.Color(DAMAGE_TIERS[tierOf(damage)] || 0xffffff).getHexString()}">dmg ${damage}</span><br>rate ${fireRate.toFixed(1)}/s · spd ${bulletSpeed.toFixed(0)}<br>bullets ${bullets.length}`;
+    `wave ${wave} · pressure ${pressure().toFixed(2)}<br>${WEAPONS[weapon].name} · squad ${shotsPerVolley()} · <span style="color:${tierCss(damage)}">dmg ${damage}</span><br>rate ${fireRate.toFixed(1)}/s · spd ${bulletSpeed.toFixed(0)}<br>bullets ${bullets.length}`;
 }
 
 function reset() {
@@ -709,10 +712,14 @@ function collect(c: Crate) {
   fx.portal(playerX, 0, new THREE.Color(look.color).getHex(), 0.9);
   if (kind === 'weapon') setWeapon(c.weapon!);
   if (kind === 'rate') fireRate = Math.min(fireRate + 0.75, 12);
-  if (kind === 'gun') { gunCount = Math.min(gunCount + 1, 4); syncSquad(); }
+  if (kind === 'gun') {
+    gunCount = Math.min(gunCount + 1, 4);
+    gateBonus = Math.min(gateBonus, MAX_SHOTS - gunCount); // never exceed the squad cap invisibly
+    syncSquad();
+  }
   if (kind === 'dmg') {
     damage += 1;
-    const tc = '#' + new THREE.Color(DAMAGE_TIERS[tierOf(damage)] || 0xffffff).getHexString();
+    const tc = tierCss(damage);
     fx.text(playerX, 3.3, 0.5, `DMG ${damage}`, tc, 1.1);
     flashScreen(`${tc}66`);
   }
@@ -747,7 +754,9 @@ function update(dt: number) {
   if (time >= wave * WAVE_SECONDS) startWave(wave + 1);
   // Accrue enemy HP to send; a living boss halves the flow so the fight stays focused.
   const bossAlive = enemies.some((e) => e.kind === 'boss');
-  hpBudget += playerDps() * pressure() * (bossAlive ? 0.5 : 1) * dt;
+  const flow = playerDps() * pressure() * (bossAlive ? 0.5 : 1);
+  // Cap the backlog at ~3s of flow: if spawns are blocked (enemy cap), don't bank a surge.
+  hpBudget = Math.min(hpBudget + flow * dt, flow * 3);
   enemyTimer -= dt;
   if (enemyTimer <= 0) {
     // Spend the budget as a pack bunched in one area, so you have to pick a lane.
@@ -813,7 +822,9 @@ function update(dt: number) {
           c.draw(u.label, u.color);
           fx.sparks(c.x, 1, c.z, 0xffe080, 16, 5);
         } else {
-          c.draw(String(Math.ceil(c.hp)), '#000a'); // weapon damage can be fractional (e.g. gatling 0.42)
+          // Weapon damage can be fractional (gatling 0.42); only redraw when the shown number changes.
+          const shown = Math.ceil(c.hp);
+          if (shown !== c.shown) { c.shown = shown; c.draw(String(shown), '#000a'); }
         }
         break;
       }
@@ -888,6 +899,7 @@ function update(dt: number) {
       fx.text(m.x, 2, m.z, '−1', '#ff6b81', 0.8);
       mates.splice(hitMate, 1);
       if (gateBonus > 1 - gunCount) gateBonus -= 1; else gunCount = Math.max(1, gunCount - 1);
+      syncSquad(); // keep the on-screen squad and the count in lockstep
       return false;
     }
     if (Math.abs(sh.x - playerX) < 0.45 && Math.abs(sh.z) < 0.5) {
@@ -929,7 +941,6 @@ function render(dt: number) {
 
   const counts: Record<string, number> = {};
   for (const k in enemyMeshes) counts[k] = 0;
-  const legTmp = new THREE.Object3D();
   for (const e of enemies) {
     const m = enemyMeshes[e.kind];
     const i = counts[e.kind]++;
@@ -951,7 +962,7 @@ function render(dt: number) {
 
     // Legs swing in opposite phase from the hips.
     const rig = enemyRigs[e.kind];
-    const limbColor = tmpColor.clone();
+    const limbColor = limbScratch.copy(tmpColor);
     for (const [leg, arm, side] of [[m.legL, m.armL, -1], [m.legR, m.armR, 1]] as const) {
       const swing = Math.sin(phase + (side > 0 ? Math.PI : 0));
       legTmp.position.set(side * rig.hipX, HIP_Y, 0);
