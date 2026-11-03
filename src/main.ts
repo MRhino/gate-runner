@@ -87,8 +87,17 @@ scene.add(player);
 function rebuildGuns() {
   guns.forEach((g) => player.remove(g));
   guns.length = 0;
-  for (const x of gunOffsets()) {
-    const g = new THREE.Mesh(new THREE.BoxGeometry(0.14, 0.14, 0.7), gunMat);
+  const offsets = gunOffsets();
+  // A crossbar holds the barrels together once the gun is wider than the body.
+  const width = offsets[offsets.length - 1] - offsets[0];
+  if (width > 0) {
+    const bar = new THREE.Mesh(new THREE.BoxGeometry(width + 0.2, 0.12, 0.25), gunMat);
+    bar.position.set(0, 0.9, -0.2);
+    player.add(bar);
+    guns.push(bar);
+  }
+  for (const x of offsets) {
+    const g = new THREE.Mesh(new THREE.BoxGeometry(0.1, 0.1, 0.7), gunMat);
     g.position.set(x, 0.9, -0.45);
     player.add(g);
     guns.push(g);
@@ -167,8 +176,13 @@ let hurtFlash = 0;
 // Bullets per volley = gun barrels + whatever the gates have added.
 const MAX_SHOTS = 30;
 const shotsPerVolley = () => THREE.MathUtils.clamp(gunCount + gateBonus, 1, MAX_SHOTS);
-const gunOffsets = () =>
-  Array.from({ length: gunCount }, (_, i) => (i - (gunCount - 1) / 2) * 0.35);
+// One barrel per bullet, side by side. The gun widens as you add shots; bullets fly straight.
+const GUN_MAX_WIDTH = 3;
+const gunOffsets = () => {
+  const n = shotsPerVolley();
+  const gap = n === 1 ? 0 : Math.min(0.25, GUN_MAX_WIDTH / (n - 1));
+  return Array.from({ length: n }, (_, i) => (i - (n - 1) / 2) * gap);
+};
 
 // ---------- Instanced bullets & enemies ----------
 const bulletMesh = new THREE.InstancedMesh(
@@ -322,6 +336,7 @@ function passGate(r: GateRow) {
   gateBonus = THREE.MathUtils.clamp(gateBonus + r.ops[i].n, 1 - gunCount, MAX_SHOTS - gunCount);
   const m = r.meshes[i].material as THREE.MeshBasicMaterial;
   m.opacity = 0.3;
+  rebuildGuns();
   navigator.vibrate?.(r.ops[i].n > 0 ? 30 : 80);
 }
 
@@ -457,15 +472,8 @@ function update(dt: number) {
   fireTimer -= dt;
   if (fireTimer <= 0) {
     fireTimer = 1 / fireRate;
-    const n = shotsPerVolley();
-    for (let i = 0; i < n; i++) {
-      const t = n === 1 ? 0 : i / (n - 1) - 0.5; // -0.5..0.5 across the fan
-      const spread = Math.min(1.6, 0.2 * n);
-      // Fan by angle, not fixed sideways speed, so faster bullets still cover the road.
-      const angle = t * 2 * Math.min(0.2, 0.04 * n);
-      if (bullets.length < MAX_BULLETS) {
-        bullets.push({ x: playerX + t * spread, z: -1, vx: Math.tan(angle) * bulletSpeed, alive: true });
-      }
+    for (const ox of gunOffsets()) {
+      if (bullets.length < MAX_BULLETS) bullets.push({ x: playerX + ox, z: -1, vx: 0, alive: true });
     }
   }
 
