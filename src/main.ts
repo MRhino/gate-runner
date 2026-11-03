@@ -45,7 +45,7 @@ function resize() {
 addEventListener('resize', resize);
 resize();
 
-// ---------- Road (scrolling stripes sell the forward motion) ----------
+// ---------- Road (static: you hold your ground, everything comes to you) ----------
 const road = new THREE.Mesh(
   new THREE.PlaneGeometry(ROAD_HALF * 2, 200),
   new THREE.MeshStandardMaterial({ color: 0x3a2f6b }),
@@ -55,14 +55,12 @@ road.position.z = -80;
 road.receiveShadow = true;
 scene.add(road);
 
-const stripes: THREE.Mesh[] = [];
 const stripeMat = new THREE.MeshBasicMaterial({ color: 0x5c4fa0 });
 for (let i = 0; i < 20; i++) {
   const s = new THREE.Mesh(new THREE.PlaneGeometry(0.15, 2), stripeMat);
   s.rotation.x = -Math.PI / 2;
   s.position.set(0, 0.01, -i * 5);
   scene.add(s);
-  stripes.push(s);
 }
 for (const side of [-1, 1]) {
   const rail = new THREE.Mesh(
@@ -121,10 +119,10 @@ function makeLabel(w = 256, h = 128) {
 }
 
 // ---------- Game state ----------
-type GateOp = { kind: 'mul' | 'add' | 'sub' | 'div'; n: number };
-type GateRow = { id: number; z: number; mid: number; ops: [GateOp, GateOp]; meshes: THREE.Mesh[] };
-type Bullet = { x: number; z: number; row: number; alive: boolean };
-type Enemy = { x: number; z: number; hp: number; speed: number; wobble: number };
+type GateOp = { n: number }; // +n or -n bullets per volley
+type GateRow = { z: number; passed: boolean; mid: number; ops: [GateOp, GateOp]; meshes: THREE.Mesh[] };
+type Bullet = { x: number; z: number; vx: number; alive: boolean };
+type Enemy = { x: number; z: number; hp: number; maxHp: number; speed: number; wobble: number };
 type UpgradeKind = 'rate' | 'gun' | 'dmg' | 'speed';
 type Crate = {
   x: number; z: number; hp: number; maxHp: number; open: boolean; kind: UpgradeKind;
@@ -145,10 +143,12 @@ let rows: GateRow[] = [];
 let crates: Crate[] = [];
 let playerX = 0, targetX = 0;
 let lives = PLAYER_LIVES, score = 0, time = 0;
-let fireRate = 3, gunCount = 1, damage = 1, bulletSpeed = 30;
-let fireTimer = 0, enemyTimer = 0, rowTimer = 2, crateTimer = 6, rowId = 0;
+let fireRate = 3, gunCount = 1, gateBonus = 0, damage = 1, bulletSpeed = 30;
+let fireTimer = 0, enemyTimer = 0, rowTimer = 2, crateTimer = 6;
 let hurtFlash = 0;
 
+// Bullets per volley = gun barrels + whatever the gates have added.
+const shotsPerVolley = () => Math.max(1, gunCount + gateBonus);
 const gunOffsets = () =>
   Array.from({ length: gunCount }, (_, i) => (i - (gunCount - 1) / 2) * 0.35);
 
@@ -170,6 +170,22 @@ enemyMesh.castShadow = true;
 enemyMesh.frustumCulled = false;
 scene.add(enemyMesh);
 
+// Health bars: a dark backing plus a fill, both instanced and facing the camera.
+const BAR_W = 0.9, BAR_H = 0.12;
+const makeBars = (color: number, order: number) => {
+  const m = new THREE.InstancedMesh(
+    new THREE.PlaneGeometry(1, 1),
+    new THREE.MeshBasicMaterial({ color, depthTest: false }),
+    MAX_ENEMIES,
+  );
+  m.frustumCulled = false;
+  m.renderOrder = order;
+  scene.add(m);
+  return m;
+};
+const barBack = makeBars(0x111111, 10);
+const barFill = makeBars(0xffffff, 11);
+
 const tmp = new THREE.Object3D();
 const tmpColor = new THREE.Color();
 
@@ -178,17 +194,10 @@ const rand = (a: number, b: number) => a + Math.random() * (b - a);
 const pick = <T,>(arr: T[]) => arr[Math.floor(Math.random() * arr.length)];
 
 function randomOp(good: boolean): GateOp {
-  if (good) {
-    return pick<GateOp>([
-      { kind: 'mul', n: 2 }, { kind: 'mul', n: 2 }, { kind: 'mul', n: 3 },
-      { kind: 'add', n: 3 }, { kind: 'add', n: 5 },
-    ]);
-  }
-  return pick<GateOp>([{ kind: 'sub', n: 1 }, { kind: 'div', n: 2 }, { kind: 'div', n: 3 }]);
+  return { n: good ? pick([1, 2, 2, 3, 3, 5]) : -pick([1, 2, 3]) };
 }
-const opText = (o: GateOp) =>
-  ({ mul: '×', add: '+', sub: '−', div: '÷' })[o.kind] + o.n;
-const isGood = (o: GateOp) => o.kind === 'mul' || o.kind === 'add';
+const opText = (o: GateOp) => (o.n > 0 ? '+' : '−') + Math.abs(o.n);
+const isGood = (o: GateOp) => o.n > 0;
 
 function spawnRow() {
   // Mostly one good + one bad side; sometimes both good with different values.
@@ -213,7 +222,7 @@ function spawnRow() {
     scene.add(m);
     meshes.push(m);
   });
-  rows.push({ id: ++rowId, z: SPAWN_Z, mid, ops, meshes });
+  rows.push({ z: SPAWN_Z, passed: false, mid, ops, meshes });
 }
 
 function spawnEnemy() {
@@ -222,10 +231,12 @@ function spawnEnemy() {
   enemies.push({
     x: rand(-ROAD_HALF + 0.5, ROAD_HALF - 0.5),
     z: SPAWN_Z + rand(-5, 0),
-    hp: 2 + tier * 2 + Math.floor(Math.random() * (2 + tier)),
+    hp: 0, maxHp: 2 + tier * 2 + Math.floor(Math.random() * (2 + tier)),
     speed: rand(3, 4.5) + tier * 0.3,
     wobble: Math.random() * 10,
   });
+  const e = enemies[enemies.length - 1];
+  e.hp = e.maxHp;
 }
 
 function spawnCrate() {
@@ -266,31 +277,14 @@ function removeRow(r: GateRow) {
 }
 
 // ---------- Gate logic ----------
-// Rows are met in id order, so each bullet only needs to remember the last row it crossed.
-let divCounter = 0;
-function applyGate(b: Bullet, r: GateRow, out: Bullet[]) {
-  b.row = r.id;
-  const op = b.x < r.mid ? r.ops[0] : r.ops[1];
-  const clone = (dx: number) => {
-    if (bullets.length + out.length >= MAX_BULLETS) return;
-    const nx = THREE.MathUtils.clamp(b.x + dx, -ROAD_HALF + 0.1, ROAD_HALF - 0.1);
-    out.push({ x: nx, z: b.z - Math.random() * 0.6, row: r.id, alive: true });
-  };
-  switch (op.kind) {
-    case 'mul':
-      for (let i = 1; i < op.n; i++) clone((i % 2 ? 1 : -1) * Math.ceil(i / 2) * 0.25);
-      break;
-    case 'add':
-      for (let i = 0; i < op.n; i++) clone(rand(-0.5, 0.5));
-      break;
-    case 'sub':
-      b.alive = false;
-      break;
-    case 'div':
-      // Keep exactly 1 in n bullets so the result is predictable, not random.
-      if (divCounter++ % op.n !== 0) b.alive = false;
-      break;
-  }
+// Gates act on the player: walking through one changes bullets per volley.
+function passGate(r: GateRow) {
+  r.passed = true;
+  const i = playerX < r.mid ? 0 : 1;
+  gateBonus = Math.max(1 - gunCount, gateBonus + r.ops[i].n);
+  const m = r.meshes[i].material as THREE.MeshBasicMaterial;
+  m.opacity = 0.3;
+  navigator.vibrate?.(r.ops[i].n > 0 ? 30 : 80);
 }
 
 // ---------- Input: relative drag ----------
@@ -326,7 +320,7 @@ function updateHud() {
   $('score').textContent = String(score);
   $('lives').textContent = '♥'.repeat(Math.max(lives, 0)) + '♡'.repeat(PLAYER_LIVES - Math.max(lives, 0));
   $('stats').innerHTML =
-    `guns ${gunCount} · dmg ${damage}<br>rate ${fireRate.toFixed(1)}/s · spd ${bulletSpeed.toFixed(0)}<br>bullets ${bullets.length}`;
+    `shots ${shotsPerVolley()} · dmg ${damage}<br>rate ${fireRate.toFixed(1)}/s · spd ${bulletSpeed.toFixed(0)}<br>bullets ${bullets.length}`;
 }
 
 function reset() {
@@ -335,7 +329,7 @@ function reset() {
   crates.forEach(removeCrate); crates = [];
   playerX = targetX = 0;
   lives = PLAYER_LIVES; score = 0; time = 0;
-  fireRate = 3; gunCount = 1; damage = 1; bulletSpeed = 30;
+  fireRate = 3; gunCount = 1; gateBonus = 0; damage = 1; bulletSpeed = 30;
   fireTimer = 0; enemyTimer = 0; rowTimer = 1.5; crateTimer = 6;
   rebuildGuns();
   updateHud();
@@ -374,11 +368,6 @@ function update(dt: number) {
   player.position.x = playerX;
   body.rotation.z = (playerX - targetX) * 0.3;
 
-  for (const s of stripes) {
-    s.position.z += WORLD_SPEED * dt;
-    if (s.position.z > 5) s.position.z -= 100;
-  }
-
   // Spawners: difficulty ramps with time.
   enemyTimer -= dt;
   if (enemyTimer <= 0) {
@@ -395,8 +384,13 @@ function update(dt: number) {
   fireTimer -= dt;
   if (fireTimer <= 0) {
     fireTimer = 1 / fireRate;
-    for (const ox of gunOffsets()) {
-      if (bullets.length < MAX_BULLETS) bullets.push({ x: playerX + ox, z: -1, row: 0, alive: true });
+    const n = shotsPerVolley();
+    for (let i = 0; i < n; i++) {
+      const t = n === 1 ? 0 : i / (n - 1) - 0.5; // -0.5..0.5 across the fan
+      const spread = Math.min(1.6, 0.2 * n);
+      if (bullets.length < MAX_BULLETS) {
+        bullets.push({ x: playerX + t * spread, z: -1, vx: t * Math.min(3, 0.4 * n), alive: true });
+      }
     }
   }
 
@@ -404,6 +398,7 @@ function update(dt: number) {
   for (const r of rows) {
     r.z += WORLD_SPEED * dt;
     r.meshes.forEach((m) => (m.position.z = r.z));
+    if (!r.passed && r.z >= 0) passGate(r);
   }
   rows = rows.filter((r) => (r.z > 3 ? (removeRow(r), false) : true));
 
@@ -414,14 +409,10 @@ function update(dt: number) {
   }
 
   // Move bullets, pass gates, hit things.
-  const spawned: Bullet[] = [];
   for (const b of bullets) {
     b.z -= bulletSpeed * dt;
-    for (const r of rows) {
-      if (r.id > b.row && b.z <= r.z) { applyGate(b, r, spawned); if (!b.alive) break; }
-    }
-    if (!b.alive) continue;
-    if (b.z < SPAWN_Z - 5) { b.alive = false; continue; }
+    b.x += b.vx * dt;
+    if (b.z < SPAWN_Z - 5 || Math.abs(b.x) > ROAD_HALF) { b.alive = false; continue; }
 
     for (const c of crates) {
       if (!c.open && Math.abs(b.x - c.x) < 0.9 && Math.abs(b.z - c.z) < 0.9) {
@@ -449,7 +440,7 @@ function update(dt: number) {
       }
     }
   }
-  bullets = bullets.filter((b) => b.alive).concat(spawned);
+  bullets = bullets.filter((b) => b.alive);
 
   // Enemies march toward the player.
   for (const e of enemies) {
@@ -498,6 +489,28 @@ function render(dt: number) {
     enemyMesh.setMatrixAt(i, tmp.matrix);
     enemyMesh.setColorAt(i, tmpColor.setHSL(0.98 - Math.min(e.hp, 20) * 0.02, 0.8, 0.55));
   }
+  for (let i = 0; i < enemies.length; i++) {
+    const e = enemies[i];
+    const frac = Math.max(0, e.hp / e.maxHp);
+    const y = 1.55 + Math.min(e.hp, 20) * 0.03;
+    tmp.quaternion.copy(camera.quaternion);
+    tmp.position.set(e.x, y, e.z);
+    tmp.scale.set(BAR_W + 0.06, BAR_H + 0.06, 1);
+    tmp.updateMatrix();
+    barBack.setMatrixAt(i, tmp.matrix);
+    // Left-align the fill so it shrinks toward the left as HP drops.
+    tmp.position.x = e.x - (BAR_W * (1 - frac)) / 2;
+    tmp.scale.set(BAR_W * frac, BAR_H, 1);
+    tmp.updateMatrix();
+    barFill.setMatrixAt(i, tmp.matrix);
+    barFill.setColorAt(i, tmpColor.setHSL(frac * 0.33, 0.9, 0.5)); // red -> green
+  }
+  tmp.rotation.set(0, 0, 0);
+  for (const m of [barBack, barFill]) {
+    m.count = enemies.length;
+    m.instanceMatrix.needsUpdate = true;
+  }
+  if (barFill.instanceColor) barFill.instanceColor.needsUpdate = true;
   enemyMesh.count = enemies.length;
   enemyMesh.instanceMatrix.needsUpdate = true;
   if (enemyMesh.instanceColor) enemyMesh.instanceColor.needsUpdate = true;
