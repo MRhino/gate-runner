@@ -199,6 +199,7 @@ type Bullet = { x: number; z: number; vx: number; alive: boolean; crate?: Crate 
 type EnemyKind = 'grunt' | 'runner' | 'blue' | 'purple' | 'orange' | 'red' | 'boss';
 type Enemy = {
   x: number; z: number; hp: number; maxHp: number; speed: number; wobble: number;
+  tx: number; retarget: number; // weaving: lateral target and time until a new one is picked
   kind: EnemyKind; size: number; color: THREE.Color; dmg: number; points: number; flash: number;
 };
 
@@ -391,6 +392,7 @@ function spawnEnemy(kind: EnemyKind, cx?: number, z = SPAWN_Z + rand(-5, 0)): nu
     hp: Math.max(1, maxHp), maxHp: Math.max(1, maxHp),
     speed: rand(6, 7.5) * (1 + (wave - 1) * 0.04) * t.speed,
     wobble: Math.random() * 10,
+    tx: 0, retarget: 0,
     kind, size: t.size, color: new THREE.Color(t.color), dmg: t.dmg, points: t.points, flash: 0,
   });
   return Math.max(1, maxHp);
@@ -414,7 +416,12 @@ function startWave(n: number) {
 
 function spawnCrate() {
   const kind = pick<UpgradeKind>(['rate', 'gun', 'dmg', 'speed']);
-  const maxHp = Math.round((30 + playerDps() * 4) * perf); // ~4s of focused fire
+  // ~3s of focused fire from the barrels that actually fit across the crate (about 2 units
+  // wide), not your whole gun. Tracking full DPS made crates unreachable once the gun got wide.
+  const offs = gunOffsets();
+  const gap = offs.length > 1 ? offs[1] - offs[0] : 1;
+  const barrelsOnCrate = Math.min(offs.length, Math.floor(2 / gap) + 1);
+  const maxHp = Math.round(20 + barrelsOnCrate * damage * fireRate * 3);
   const mesh = new THREE.Mesh(
     new THREE.BoxGeometry(1.6, 1.6, 1.6),
     new THREE.MeshStandardMaterial({ color: 0x8a6a4a }),
@@ -665,7 +672,18 @@ function update(dt: number) {
   for (const e of enemies) {
     if (e.hp <= 0) continue;
     e.z += e.speed * dt;
-    if (e.kind !== 'boss') e.x += Math.sin(time * 2 + e.wobble) * dt * 0.4;
+    // Weave: every 0.8-2.5s pick a new spot across the road and drift toward it.
+    // Small/fast types dart around a lot; big ones lumber and barely change lanes.
+    if (e.kind !== 'boss') {
+      const agility = 1.6 / e.size;
+      if ((e.retarget -= dt) <= 0) {
+        const edge = ROAD_HALF - 0.4 * e.size;
+        e.tx = THREE.MathUtils.clamp(e.x + rand(-3, 3) * agility, -edge, edge);
+        e.retarget = rand(0.8, 2.5);
+      }
+      const dx = e.tx - e.x;
+      e.x += Math.sign(dx) * Math.min(Math.abs(dx), 2.2 * agility * dt);
+    }
     if (e.z > -0.3) {
       e.hp = 0;
       lives -= e.dmg;
