@@ -10,7 +10,8 @@ import { OutputPass } from 'three/examples/jsm/postprocessing/OutputPass.js';
 // A new deploy installs in the background and would normally reload the page straight
 // away — mid-run if you'd just tapped play. Defer that reload until you're not playing.
 let reloadPending = false;
-registerSW({
+declare const __APP_VERSION__: string, __COMMIT__: string;
+const updateSW = registerSW({
   immediate: true,
   onNeedReload() {
     if (state === 'play' || state === 'paused') reloadPending = true;
@@ -664,6 +665,19 @@ function gameOver() {
   overlay.classList.remove('hidden');
 }
 $('best').textContent = best() ? `Best ${best()}` : '';
+
+// Version + manual update check on the start screen.
+$('version-text').textContent = `v${__APP_VERSION__.split('.').slice(0, 2).join('.')} · ${__COMMIT__}`;
+$('refresh').addEventListener('click', async () => {
+  const btn = $('refresh');
+  btn.textContent = 'Checking…';
+  const reg = await navigator.serviceWorker?.getRegistration();
+  await reg?.update().catch(() => {});
+  // If a new version was found it installs and activates on its own, then reloads the page
+  // via onNeedReload. Either way, force a fresh reload shortly after so the button always does something.
+  if (reg?.waiting) await updateSW(true);
+  setTimeout(() => location.reload(), 1500);
+});
 
 function collect(kind: UpgradeKind) {
   if (kind === 'rate') fireRate = Math.min(fireRate + 0.75, 12);

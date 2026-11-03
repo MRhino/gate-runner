@@ -1,7 +1,18 @@
 import { defineConfig } from 'vite';
 import { VitePWA } from 'vite-plugin-pwa';
+import { execSync } from 'node:child_process';
+import pkg from './package.json' with { type: 'json' };
+
+// Shown on the start screen so you can tell which build you're running.
+const commit = (process.env.VERCEL_GIT_COMMIT_SHA ?? (() => {
+  try { return execSync('git rev-parse HEAD').toString().trim(); } catch { return 'dev'; }
+})()).slice(0, 7);
 
 export default defineConfig({
+  define: {
+    __APP_VERSION__: JSON.stringify(pkg.version),
+    __COMMIT__: JSON.stringify(commit),
+  },
   plugins: [
     VitePWA({
       registerType: 'autoUpdate',
