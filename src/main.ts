@@ -7,9 +7,9 @@ registerSW({ immediate: true });
 // ---------- Tunables ----------
 const ROAD_HALF = 4; // road spans x in [-4, 4]
 const SPAWN_Z = -70;
-const WORLD_SPEED = 7; // speed gates / crates move toward the player
+const WORLD_SPEED = 5; // speed gates / crates move toward the player
 const MAX_BULLETS = 800;
-const MAX_ENEMIES = 250;
+const MAX_ENEMIES = 400;
 const PLAYER_LIVES = 5;
 
 // ---------- Renderer / scene ----------
@@ -155,7 +155,7 @@ let rows: GateRow[] = [];
 let crates: Crate[] = [];
 let playerX = 0, targetX = 0;
 let lives = PLAYER_LIVES, score = 0, time = 0, wave = 0;
-let fireRate = 3, gunCount = 1, gateBonus = 0, damage = 1, bulletSpeed = 30;
+let fireRate = 5, gunCount = 1, gateBonus = 0, damage = 1, bulletSpeed = 30;
 let fireTimer = 0, enemyTimer = 0, rowTimer = 2, crateTimer = 6;
 let hurtFlash = 0;
 
@@ -239,17 +239,17 @@ function spawnRow() {
 
 const WAVE_SECONDS = 20;
 
-function spawnEnemy(kind: EnemyKind) {
+function spawnEnemy(kind: EnemyKind, cx?: number, z = SPAWN_Z + rand(-5, 0)) {
   if (enemies.length >= MAX_ENEMIES) return;
   const t = ENEMY_TYPES[kind];
   // HP grows ~30% per wave, speed ~5% per wave: slow start, steep later.
-  const maxHp = Math.round(3 * Math.pow(1.3, wave - 1) * t.hp * rand(0.8, 1.2));
+  const maxHp = Math.round(2 * Math.pow(1.3, wave - 1) * t.hp * rand(0.8, 1.2));
   const edge = ROAD_HALF - 0.4 * t.size;
   enemies.push({
-    x: kind === 'boss' ? 0 : rand(-edge, edge),
-    z: SPAWN_Z + rand(-5, 0),
+    x: kind === 'boss' ? 0 : THREE.MathUtils.clamp(cx ?? rand(-edge, edge), -edge, edge),
+    z,
     hp: Math.max(1, maxHp), maxHp: Math.max(1, maxHp),
-    speed: rand(3, 4) * (1 + (wave - 1) * 0.05) * t.speed,
+    speed: rand(6, 7.5) * (1 + (wave - 1) * 0.04) * t.speed,
     wobble: Math.random() * 10,
     kind, size: t.size, hue: t.hue, dmg: t.dmg, points: t.points,
   });
@@ -367,8 +367,8 @@ function reset() {
   crates.forEach(removeCrate); crates = [];
   playerX = targetX = 0;
   lives = PLAYER_LIVES; score = 0; time = 0; wave = 0;
-  fireRate = 3; gunCount = 1; gateBonus = 0; damage = 1; bulletSpeed = 30;
-  fireTimer = 0; enemyTimer = 0; rowTimer = 1.5; crateTimer = 6;
+  fireRate = 5; gunCount = 1; gateBonus = 0; damage = 1; bulletSpeed = 30;
+  fireTimer = 0; enemyTimer = 2; rowTimer = 0.5; crateTimer = 6;
   rebuildGuns();
   updateHud();
 }
@@ -410,9 +410,13 @@ function update(dt: number) {
   if (time >= wave * WAVE_SECONDS) startWave(wave + 1);
   enemyTimer -= dt;
   if (enemyTimer <= 0) {
-    const burst = 1 + Math.floor((wave - 1) / 2);
-    for (let i = 0; i < burst; i++) spawnEnemy(randomKind());
-    enemyTimer = Math.max(0.4, 1.6 * Math.pow(0.92, wave - 1));
+    // Enemies arrive in packs that bunch up in one area, so you have to pick a lane.
+    const pack = 2 + wave * 2 + Math.floor(Math.random() * 3);
+    const cx = rand(-ROAD_HALF + 1, ROAD_HALF - 1);
+    for (let i = 0; i < pack; i++) {
+      spawnEnemy(randomKind(), cx + rand(-1.6, 1.6), SPAWN_Z - Math.floor(i / 4) * 1.2 + rand(-0.3, 0.3));
+    }
+    enemyTimer = Math.max(0.8, 2.2 * Math.pow(0.93, wave - 1));
   }
   rowTimer -= dt;
   if (rowTimer <= 0) { spawnRow(); rowTimer = rand(3.5, 5); }
@@ -523,6 +527,7 @@ function render(dt: number) {
   for (let i = 0; i < enemies.length; i++) {
     const e = enemies[i];
     tmp.position.set(e.x, 0.6 * e.size + Math.abs(Math.sin(time * 8 + e.wobble)) * 0.15, e.z);
+    tmp.rotation.set(0.35, 0, Math.sin(time * 10 + e.wobble) * 0.15);
     tmp.scale.setScalar(e.size);
     tmp.updateMatrix();
     enemyMesh.setMatrixAt(i, tmp.matrix);
@@ -533,6 +538,7 @@ function render(dt: number) {
     const frac = Math.max(0, e.hp / e.maxHp);
     const y = 1.55 * e.size + 0.1;
     tmp.quaternion.copy(camera.quaternion);
+    tmp.rotation.setFromQuaternion(tmp.quaternion);
     tmp.position.set(e.x, y, e.z);
     const w = BAR_W * Math.max(1, e.size * 0.8);
     tmp.scale.set(w + 0.06, BAR_H + 0.06, 1);
