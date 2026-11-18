@@ -6,6 +6,8 @@ Lead a growing squad of troopers down a haunted road, choose which energy gates 
 
 ▶ **Play it:** https://gate-runner-five.vercel.app. On a phone, open it in Safari or Chrome and choose **Add to Home Screen**. It then runs fullscreen and offline like a native app.
 
+[![Deploy with Vercel](https://vercel.com/button)](https://vercel.com/new/clone?repository-url=https%3A%2F%2Fgithub.com%2FMRhino%2Fgate-runner&project-name=gate-runner) &nbsp; [Deploy your own](#deploy-your-own) · [Run it locally](#running-locally)
+
 <p align="center">
   <img src="docs/screenshots/menu.png" width="19%" alt="Start screen" />
   <img src="docs/screenshots/gates.png" width="19%" alt="Choosing between a red and a blue gate" />
@@ -135,7 +137,22 @@ A few things that made that loop work:
 - **Problems were diagnosed before they were patched.** For example, "enemies walk away from you" turned out to be enemies moving slower than the gates, so they *looked* like they were retreating.
 - **Measurements over guesses.** Vertex counts were checked before shipping new models, colours were measured to confirm bloom behaviour, and these screenshots were captured by driving headless Chrome through real gameplay.
 
+## Deploy your own
+
+Gate Runner is a fully static site, so it goes live on Vercel with no configuration and no environment variables.
+
+1. Click **Deploy with Vercel** above. It forks the repo to your GitHub account and creates a Vercel project.
+2. Wait for the build (about a minute). Vercel detects Vite automatically: build command `npm run build`, output `dist/`.
+3. Open your new URL on a phone and choose **Add to Home Screen** (Safari) or **Install app** (Chrome). It now runs fullscreen and offline.
+
+Every push to `main` redeploys, and installed copies pick up the update between runs. Prefer another host? `npm run build` and upload `dist/` anywhere that serves HTTPS.
+
+**Make it your own:** the app name, colours and description are in the PWA manifest in [`vite.config.ts`](vite.config.ts); weapons in [`src/weapons.ts`](src/weapons.ts); enemy designs in [`src/models.ts`](src/models.ts); difficulty in the pressure director in [`src/main.ts`](src/main.ts).
+
 ## Running locally
+
+You need **Node.js 22.12 or newer**.
+
 
 ```bash
 npm install
@@ -151,3 +168,12 @@ Note that installing to the home screen and offline play need HTTPS, so test tho
 ## Status
 
 A playable prototype and portfolio piece, not a commercial product. Possible next steps: sound and music, staged levels with end bosses, unlockable starting weapons, and a balance pass from real play data.
+
+## More games
+
+- [**Blaster Bricks**](https://github.com/MRhino/blaster-bricks): a neon ball-shooter with daily, weekly and monthly challenges
+- [**Grid Lock**](https://github.com/MRhino/grid-lock): a tin-toy sliding-traffic puzzle with 300 generated levels
+
+## License
+
+[MIT](LICENSE). Fork it, reskin it, ship it.
